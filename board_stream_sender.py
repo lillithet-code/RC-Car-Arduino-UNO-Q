@@ -122,8 +122,36 @@ def list_video_device_indices():
         match = re.match(r'^/dev/video(\d+)$', path)
         if not match:
             continue
-        indices.append(int(match.group(1)))
+        index = int(match.group(1))
+        # Skip known codec-only nodes (encoder/decoder) to avoid false camera probes.
+        name_path = f'/sys/class/video4linux/video{index}/name'
+        try:
+            with open(name_path, 'r', encoding='utf-8', errors='ignore') as handle:
+                node_name = handle.read().strip().lower()
+            if any(token in node_name for token in ('encoder', 'decoder', 'codec')):
+                continue
+        except Exception:
+            pass
+        indices.append(index)
     return indices
+
+
+def stop_h264_process(process, reason):
+    if process is None:
+        return
+
+    try:
+        process.terminate()
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        print(f'h264 process did not stop quickly ({reason}); killing', file=sys.stderr)
+        process.kill()
+        try:
+            process.wait(timeout=1.0)
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f'h264 process stop error ({reason}): {exc}', file=sys.stderr)
 
 
 def probe_video_device(device_index):
@@ -446,7 +474,7 @@ def main():
                 cap = None
                 print('camera released while idle')
             if h264_process is not None:
-                h264_process.terminate()
+                stop_h264_process(h264_process, 'idle')
                 h264_process = None
                 print('h264 encoder stopped while idle')
             if h264_upload_buffer:
@@ -565,7 +593,7 @@ def main():
                         f'h264 pipeline produced no output for {H264_STARTUP_TIMEOUT_SECONDS:.1f}s; restarting encoder',
                         file=sys.stderr,
                     )
-                    h264_process.terminate()
+                    stop_h264_process(h264_process, 'startup-timeout')
                     h264_process = None
                     h264_started_at = None
                     h264_last_chunk_at = None
@@ -576,7 +604,7 @@ def main():
                         f'h264 pipeline stalled for {H264_STALL_TIMEOUT_SECONDS:.1f}s; restarting encoder',
                         file=sys.stderr,
                     )
-                    h264_process.terminate()
+                    stop_h264_process(h264_process, 'stall-timeout')
                     h264_process = None
                     h264_started_at = None
                     h264_last_chunk_at = None
