@@ -221,6 +221,14 @@ def create_app(test_config=None):
         duration_seconds = 300
         active_session = get_active_session(session['user_id'])
         remaining_seconds = get_remaining_seconds(session['user_id'], active_session)
+        if active_session:
+            return render_template(
+                'dashboard.html',
+                user=user,
+                error='You already have an active session',
+                active_session=active_session,
+                remaining_seconds=remaining_seconds,
+            )
         if user['balance'] < duration_seconds:
             return render_template('dashboard.html', user=user, error='Not enough credit', active_session=active_session, remaining_seconds=remaining_seconds)
 

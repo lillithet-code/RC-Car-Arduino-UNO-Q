@@ -32,7 +32,7 @@
       <div class="hero">
         <div>
           <h1>Welcome, {{ user.username }}</h1>
-          <div class="pill">Remaining time: {{ remaining_seconds if remaining_seconds is not none else user.balance }}s</div>
+          <div class="pill">Remaining time: <span id="remaining-time" data-seconds="{{ remaining_seconds if active_session else '' }}">{{ remaining_seconds if remaining_seconds is not none else user.balance }}s</span></div>
         </div>
         <div class="top-actions">
           {% if user.is_admin %}<a href="{{ url_for('admin') }}">Admin panel</a>{% endif %}
@@ -58,7 +58,7 @@
         <p>Connected to {{ active_session.name }}. Your time is counting down live.</p>
         <div class="session-layout">
           <div class="video-panel">
-            <img class="stream" src="{{ url_for('video_feed', mode='stream') }}" alt="Live video stream">
+            <img id="stream-image" class="stream" src="{{ url_for('video_feed', mode='single') }}" alt="Live video stream">
           </div>
           <div class="joystick-panel">
             <div class="joystick" id="joystick">
@@ -77,7 +77,39 @@
   <script>
     const joystick = document.getElementById('joystick');
     const knob = document.getElementById('knob');
+    const streamImage = document.getElementById('stream-image');
+    const remainingTime = document.getElementById('remaining-time');
     let dragging = false;
+
+    function formatSeconds(totalSeconds) {
+      const safe = Math.max(0, Number(totalSeconds) || 0);
+      const hours = Math.floor(safe / 3600);
+      const minutes = Math.floor((safe % 3600) / 60);
+      const seconds = Math.floor(safe % 60);
+      if (hours > 0) {
+        return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+      }
+      return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    if (remainingTime && remainingTime.dataset.seconds) {
+      let remainingSeconds = parseInt(remainingTime.dataset.seconds, 10);
+      if (!Number.isNaN(remainingSeconds)) {
+        remainingTime.textContent = `${formatSeconds(remainingSeconds)} (${remainingSeconds}s)`;
+        setInterval(() => {
+          remainingSeconds = Math.max(0, remainingSeconds - 1);
+          remainingTime.textContent = `${formatSeconds(remainingSeconds)} (${remainingSeconds}s)`;
+        }, 1000);
+      }
+    }
+
+    if (streamImage) {
+      const refreshStreamFrame = () => {
+        streamImage.src = `{{ url_for('video_feed', mode='single') }}&t=${Date.now()}`;
+      };
+      refreshStreamFrame();
+      setInterval(refreshStreamFrame, 250);
+    }
 
     function sendAction(action) {
       fetch('/api/control', {
@@ -106,32 +138,31 @@
       sendAction(action);
     }
 
-    joystick.addEventListener('pointerdown', (event) => {
+    if (joystick && knob) {
+      joystick.addEventListener('pointerdown', (event) => {
       dragging = true;
       joystick.setPointerCapture(event.pointerId);
       updateFromPointer(event.clientX, event.clientY);
-    });
+      });
 
-    joystick.addEventListener('pointermove', (event) => {
+      joystick.addEventListener('pointermove', (event) => {
       if (!dragging) return;
       updateFromPointer(event.clientX, event.clientY);
-    });
+      });
 
-    joystick.addEventListener('pointerup', () => {
+      joystick.addEventListener('pointerup', () => {
       dragging = false;
       knob.style.left = '75px';
       knob.style.top = '75px';
       sendAction('stop');
-    });
-    joystick.addEventListener('pointercancel', () => {
+      });
+      joystick.addEventListener('pointercancel', () => {
       dragging = false;
       knob.style.left = '75px';
       knob.style.top = '75px';
       sendAction('stop');
-    });
+      });
+    }
   </script>
-</body>
-</html>
-  </div>
 </body>
 </html>

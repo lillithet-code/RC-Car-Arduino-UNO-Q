@@ -82,6 +82,33 @@ def test_device_registration_and_booking(client):
     assert b'Control session started' in response.data
 
 
+def test_request_car_does_not_double_charge_with_active_session(client):
+    client.post('/register', data={
+        'username': 'dave',
+        'password': 'secret123',
+        'email': 'dave@example.com'
+    })
+    client.post('/login', data={
+        'username': 'dave',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-dave',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+
+    first_request = client.post('/request_car')
+    assert first_request.status_code == 200
+    assert b'Control session started' in first_request.data
+
+    second_request = client.post('/request_car')
+    assert second_request.status_code == 200
+    assert b'You already have an active session' in second_request.data
+
+
 def test_stream_chunk_endpoint_and_video_feed(client):
     response = client.post('/api/stream/chunk', data=b'chunk-one', content_type='image/jpeg')
     assert response.status_code == 200
