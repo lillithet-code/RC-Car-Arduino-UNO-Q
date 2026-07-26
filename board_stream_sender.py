@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 import json
+import http.client
 import os
 import select
 import subprocess
 import sys
 import time
+import ssl
 from urllib import request as urllib_request
+from urllib import parse as urllib_parse
 
 import cv2
 
 
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
+SERVER_BASE_PARTS = urllib_parse.urlparse(SERVER_BASE_URL)
+SERVER_SCHEME = SERVER_BASE_PARTS.scheme or 'https'
+SERVER_HOST = SERVER_BASE_PARTS.hostname or SERVER_BASE_PARTS.path
+SERVER_PORT = SERVER_BASE_PARTS.port or (443 if SERVER_SCHEME == 'https' else 80)
 STREAM_ENDPOINT = f'{SERVER_BASE_URL}/api/video/pipeline/frame'
 STREAM_H264_ENDPOINT = f'{SERVER_BASE_URL}/api/video/h264/chunk'
 STREAM_STATUS_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/status'
@@ -40,6 +47,8 @@ H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
 STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
 STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
+_UPLOAD_CONNECTION = None
+_UPLOAD_CONNECTION_KEY = None
 
 
 def get_h264_encoders():
@@ -112,16 +121,57 @@ def fetch_stream_enabled_profiled(poll_count):
 
 
 def post_bytes(url, payload, content_type):
-    req = urllib_request.Request(
-        url,
-        data=payload,
-        headers={
-            'Content-Type': content_type,
-            'X-Board-Token': BOARD_TOKEN,
-        },
-        method='POST',
-    )
-    urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
+    global _UPLOAD_CONNECTION, _UPLOAD_CONNECTION_KEY
+
+    parsed = urllib_parse.urlparse(url)
+    request_path = parsed.path or '/'
+    if parsed.query:
+        request_path = f'{request_path}?{parsed.query}'
+
+    connection_key = (parsed.scheme or SERVER_SCHEME, parsed.hostname or SERVER_HOST, parsed.port or SERVER_PORT)
+    if _UPLOAD_CONNECTION is None or _UPLOAD_CONNECTION_KEY != connection_key:
+        if _UPLOAD_CONNECTION is not None:
+            try:
+                _UPLOAD_CONNECTION.close()
+            except Exception:
+                pass
+        timeout = max(UPLOAD_TIMEOUT_SECONDS, 1.0)
+        if connection_key[0] == 'https':
+            _UPLOAD_CONNECTION = http.client.HTTPSConnection(
+                connection_key[1],
+                connection_key[2],
+                timeout=timeout,
+                context=ssl.create_default_context(),
+            )
+        else:
+            _UPLOAD_CONNECTION = http.client.HTTPConnection(
+                connection_key[1],
+                connection_key[2],
+                timeout=timeout,
+            )
+        _UPLOAD_CONNECTION_KEY = connection_key
+
+    headers = {
+        'Content-Type': content_type,
+        'Content-Length': str(len(payload)),
+        'Connection': 'keep-alive',
+        'X-Board-Token': BOARD_TOKEN,
+    }
+
+    try:
+        _UPLOAD_CONNECTION.request('POST', request_path, body=payload, headers=headers)
+        response = _UPLOAD_CONNECTION.getresponse()
+        response.read()
+        if response.status >= 400:
+            raise RuntimeError(f'upload returned HTTP {response.status}')
+    except Exception:
+        try:
+            _UPLOAD_CONNECTION.close()
+        except Exception:
+            pass
+        _UPLOAD_CONNECTION = None
+        _UPLOAD_CONNECTION_KEY = None
+        raise
 
 
 def log_profile_summary(*, path, event_count, total_elapsed, read_elapsed=None, post_elapsed=None, encode_elapsed=None, upload_bytes=None, extra=None):
