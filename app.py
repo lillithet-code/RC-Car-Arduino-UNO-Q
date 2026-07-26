@@ -118,6 +118,7 @@ def create_app(test_config=None):
     def refresh_sessions():
         db = get_db()
         now = datetime.now(timezone.utc)
+        last_stream_at = app_state.get('last_stream_at')
         active_rows = db.execute(
             "SELECT id, user_id, device_id, billing_started_at, allocated_seconds FROM sessions WHERE status = 'active'"
         ).fetchall()
@@ -138,7 +139,8 @@ def create_app(test_config=None):
                 changed = True
                 continue
 
-            if billing_started_at is not None and not is_stream_live(now):
+            # Only enforce stream-loss after at least one stream frame has been observed.
+            if billing_started_at is not None and last_stream_at is not None and not is_stream_live(now):
                 db.execute("UPDATE sessions SET status = 'stream_lost' WHERE id = ?", (row['id'],))
                 db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (remaining_seconds, row['user_id']))
