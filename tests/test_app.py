@@ -139,6 +139,44 @@ def test_release_car_refunds_unused_time(client):
     assert int(match.group(1)) > 300
 
 
+def test_session_countdown_starts_after_stream_appears(client):
+    client.post('/register', data={
+        'username': 'frank',
+        'password': 'secret123',
+        'email': 'frank@example.com'
+    })
+    client.post('/login', data={
+        'username': 'frank',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-frank',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+
+    request_response = client.post('/request_car')
+    assert request_response.status_code == 200
+
+    pre_stream_status = client.get('/api/session/status')
+    assert pre_stream_status.status_code == 200
+    pre_payload = pre_stream_status.get_json()
+    assert pre_payload['active'] is True
+    assert pre_payload['billing_started'] is False
+    assert pre_payload['remaining_seconds'] == 300
+
+    frame_response = client.post('/api/video/pipeline/frame', data=b'frame-start', content_type='image/jpeg')
+    assert frame_response.status_code == 200
+
+    post_stream_status = client.get('/api/session/status')
+    assert post_stream_status.status_code == 200
+    post_payload = post_stream_status.get_json()
+    assert post_payload['active'] is True
+    assert post_payload['billing_started'] is True
+
+
 def test_stream_chunk_endpoint_and_video_feed(client):
     response = client.post('/api/stream/chunk', data=b'chunk-one', content_type='image/jpeg')
     assert response.status_code == 200

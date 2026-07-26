@@ -79,6 +79,7 @@
     const knob = document.getElementById('knob');
     const streamImage = document.getElementById('stream-image');
     const remainingTime = document.getElementById('remaining-time');
+    const streamSingleBaseUrl = '{{ url_for('video_feed', mode='single') }}';
     let dragging = false;
 
     function formatSeconds(totalSeconds) {
@@ -92,23 +93,54 @@
       return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     }
 
-    if (remainingTime && remainingTime.dataset.seconds) {
-      let remainingSeconds = parseInt(remainingTime.dataset.seconds, 10);
-      if (!Number.isNaN(remainingSeconds)) {
-        remainingTime.textContent = `${formatSeconds(remainingSeconds)} (${remainingSeconds}s)`;
-        setInterval(() => {
-          remainingSeconds = Math.max(0, remainingSeconds - 1);
-          remainingTime.textContent = `${formatSeconds(remainingSeconds)} (${remainingSeconds}s)`;
-        }, 1000);
+    function renderRemainingSeconds(remainingSeconds, billingStarted) {
+      if (!remainingTime) {
+        return;
+      }
+      const safe = Math.max(0, Number(remainingSeconds) || 0);
+      if (billingStarted) {
+        remainingTime.textContent = `${formatSeconds(safe)} (${safe}s)`;
+      } else {
+        remainingTime.textContent = `${safe}s (waiting for stream)`;
       }
     }
 
-    if (streamImage) {
-      const refreshStreamFrame = () => {
-        streamImage.src = `{{ url_for('video_feed', mode='single') }}&t=${Date.now()}`;
-      };
+    function refreshStreamFrame() {
+      if (!streamImage) {
+        return;
+      }
+      streamImage.src = `${streamSingleBaseUrl}&t=${Date.now()}`;
+    }
+
+    async function pollSessionStatus() {
+      try {
+        const response = await fetch('/api/session/status', { cache: 'no-store' });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (payload.status !== 'ok') {
+          return;
+        }
+
+        renderRemainingSeconds(payload.remaining_seconds, payload.billing_started);
+
+        if (payload.active && payload.stream_live) {
+          refreshStreamFrame();
+        }
+
+        if (!payload.active && joystick) {
+          window.location.reload();
+        }
+      } catch (error) {
+        // Keep UI running; transient polling errors should not break controls.
+      }
+    }
+
+    if (streamImage || remainingTime) {
       refreshStreamFrame();
-      setInterval(refreshStreamFrame, 250);
+      pollSessionStatus();
+      setInterval(pollSessionStatus, 1000);
     }
 
     function sendAction(action) {

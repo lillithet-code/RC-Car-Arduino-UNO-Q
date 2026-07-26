@@ -13,6 +13,8 @@ def create_app(test_config=None):
     app.config['DATABASE_URL'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
     app.config['STREAM_MAX_QUEUE'] = int(os.environ.get('STREAM_MAX_QUEUE', '8'))
     app.config['BOARD_TOKEN'] = os.environ.get('BOARD_TOKEN', 'dev-board-token')
+    app.config['SESSION_DURATION_SECONDS'] = int(os.environ.get('SESSION_DURATION_SECONDS', '300'))
+    app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '2.0'))
 
     if test_config:
         app.config.update(test_config)
@@ -75,16 +77,38 @@ def create_app(test_config=None):
             ''')
             ensure_column('users', 'is_admin', 'INTEGER DEFAULT 0')
             ensure_column('users', 'balance', 'INTEGER DEFAULT 0')
+            ensure_column('sessions', 'billing_started_at', 'TEXT')
             db.commit()
 
     def refresh_sessions():
         db = get_db()
         now = datetime.now(timezone.utc)
-        rows = db.execute("SELECT id, device_id FROM sessions WHERE status = 'active' AND expires_at <= ?", (now.strftime('%Y-%m-%d %H:%M:%S'),)).fetchall()
-        for row in rows:
-            db.execute("UPDATE sessions SET status = 'expired' WHERE id = ?", (row['id'],))
-            db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
-        if rows:
+        active_rows = db.execute(
+            "SELECT id, user_id, device_id, billing_started_at FROM sessions WHERE status = 'active'"
+        ).fetchall()
+        changed = False
+
+        for row in active_rows:
+            billing_started_at = parse_timestamp(row['billing_started_at'])
+            if billing_started_at is None:
+                continue
+
+            elapsed_seconds = max(0, int((now - billing_started_at).total_seconds()))
+            remaining_seconds = max(0, app.config['SESSION_DURATION_SECONDS'] - elapsed_seconds)
+
+            if remaining_seconds <= 0:
+                db.execute("UPDATE sessions SET status = 'expired' WHERE id = ?", (row['id'],))
+                db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
+                changed = True
+                continue
+
+            if not is_stream_live(now):
+                db.execute("UPDATE sessions SET status = 'stream_lost' WHERE id = ?", (row['id'],))
+                db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
+                db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (remaining_seconds, row['user_id']))
+                changed = True
+
+        if changed:
             db.commit()
 
     def format_seconds(total_seconds):
@@ -103,7 +127,7 @@ def create_app(test_config=None):
     def get_active_session(user_id):
         db = get_db()
         return db.execute('''
-            SELECT s.id, s.device_id, s.expires_at, d.name
+            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, d.name
             FROM sessions s
             JOIN devices d ON d.id = s.device_id
             WHERE s.user_id = ? AND s.status = 'active'
@@ -114,9 +138,12 @@ def create_app(test_config=None):
         if active_session is None:
             active_session = get_active_session(user_id)
         if active_session is not None:
-            expires_at = datetime.strptime(active_session['expires_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            billing_started_at = parse_timestamp(active_session['billing_started_at'])
+            if billing_started_at is None:
+                return app.config['SESSION_DURATION_SECONDS']
             now = datetime.now(timezone.utc)
-            return max(0, int((expires_at - now).total_seconds()))
+            elapsed_seconds = max(0, int((now - billing_started_at).total_seconds()))
+            return max(0, app.config['SESSION_DURATION_SECONDS'] - elapsed_seconds)
         user = get_user_view(user_id)
         return max(0, int(user['balance'])) if user else 0
 
@@ -126,6 +153,35 @@ def create_app(test_config=None):
     latest_stream_chunk = None
     pending_commands = Queue()
     pipeline_frame_counter = 0
+    app_state = {'last_stream_at': None}
+
+    def parse_timestamp(raw_value):
+        if not raw_value:
+            return None
+        return datetime.strptime(raw_value, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+
+    def is_stream_live(now=None):
+        if now is None:
+            now = datetime.now(timezone.utc)
+        last_stream_at = app_state['last_stream_at']
+        if last_stream_at is None:
+            return False
+        return (now - last_stream_at).total_seconds() <= app.config['STREAM_STALE_SECONDS']
+
+    def mark_stream_activity():
+        now = datetime.now(timezone.utc)
+        app_state['last_stream_at'] = now
+
+        db = get_db()
+        waiting_session = db.execute(
+            "SELECT id FROM sessions WHERE status = 'active' AND billing_started_at IS NULL ORDER BY id LIMIT 1"
+        ).fetchone()
+        if waiting_session:
+            db.execute(
+                "UPDATE sessions SET billing_started_at = ? WHERE id = ?",
+                (now.strftime('%Y-%m-%d %H:%M:%S'), waiting_session['id'])
+            )
+            db.commit()
 
     @app.before_request
     def ensure_session_state():
@@ -218,7 +274,7 @@ def create_app(test_config=None):
 
         db = get_db()
         user = get_user_view(session['user_id'])
-        duration_seconds = 300
+        duration_seconds = app.config['SESSION_DURATION_SECONDS']
         active_session = get_active_session(session['user_id'])
         remaining_seconds = get_remaining_seconds(session['user_id'], active_session)
         if active_session:
@@ -236,10 +292,10 @@ def create_app(test_config=None):
         if not device:
             return render_template('dashboard.html', user=user, error='No cars available right now', active_session=active_session, remaining_seconds=remaining_seconds)
 
-        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)).strftime('%Y-%m-%d %H:%M:%S')
         db.execute(
-            'INSERT INTO sessions (user_id, device_id, expires_at) VALUES (?, ?, ?)',
-            (user['id'], device['id'], expires_at)
+            'INSERT INTO sessions (user_id, device_id, expires_at, billing_started_at) VALUES (?, ?, ?, ?)',
+            (user['id'], device['id'], expires_at, None)
         )
         db.execute('UPDATE devices SET status = ? WHERE id = ?', ('busy', device['id']))
         db.execute('UPDATE users SET balance = balance - ? WHERE id = ?', (duration_seconds, user['id']))
@@ -265,15 +321,38 @@ def create_app(test_config=None):
         db = get_db()
         active_session = get_active_session(session['user_id'])
         if active_session:
-            now = datetime.now(timezone.utc)
-            expires_at = datetime.strptime(active_session['expires_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
-            refundable_seconds = max(0, int((expires_at - now).total_seconds()))
+            refundable_seconds = get_remaining_seconds(session['user_id'], active_session)
             db.execute("UPDATE sessions SET status = 'released' WHERE id = ?", (active_session['id'],))
             db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (active_session['device_id'],))
             if refundable_seconds > 0:
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refundable_seconds, session['user_id']))
             db.commit()
         return redirect(url_for('index'))
+
+    @app.route('/api/session/status')
+    def session_status():
+        if 'user_id' not in session:
+            return jsonify({'status': 'unauthorized'}), 401
+
+        active_session = get_active_session(session['user_id'])
+        if not active_session:
+            user = get_user_view(session['user_id'])
+            return jsonify({
+                'status': 'ok',
+                'active': False,
+                'remaining_seconds': max(0, int(user['balance'])) if user else 0,
+                'stream_live': is_stream_live(),
+                'billing_started': False,
+            })
+
+        return jsonify({
+            'status': 'ok',
+            'active': True,
+            'remaining_seconds': get_remaining_seconds(session['user_id'], active_session),
+            'stream_live': is_stream_live(),
+            'billing_started': active_session['billing_started_at'] is not None,
+            'device': active_session['name'],
+        })
 
     @app.route('/admin', methods=['GET', 'POST'])
     def admin():
@@ -349,6 +428,7 @@ def create_app(test_config=None):
         if not data:
             return jsonify({'status': 'error', 'message': 'chunk data is required'}), 400
 
+        mark_stream_activity()
         latest_stream_chunk = data
         if stream_queue.full():
             try:
@@ -365,6 +445,7 @@ def create_app(test_config=None):
         if not data:
             return jsonify({'status': 'error', 'message': 'frame data is required'}), 400
 
+        mark_stream_activity()
         pipeline_frame_counter += 1
         latest_stream_chunk = data
         if stream_queue.full():
