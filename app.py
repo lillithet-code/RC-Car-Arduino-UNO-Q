@@ -444,8 +444,19 @@ def create_app(test_config=None):
                 'type': pc.localDescription.type,
             }
 
-        result = asyncio.run(handle_offer())
-        return jsonify(result)
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(handle_offer())
+            return jsonify(result)
+        except Exception as exc:
+            try:
+                loop.run_until_complete(pc.close())
+            except Exception:
+                pass
+            peer_connections.discard(pc)
+            return jsonify({'status': 'error', 'message': f'webrtc offer failed: {exc}'}), 500
+        finally:
+            loop.close()
 
     @app.route('/admin', methods=['GET', 'POST'])
     def admin():

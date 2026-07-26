@@ -167,7 +167,14 @@
         });
 
         if (!response.ok) {
-          throw new Error('WebRTC offer failed');
+          let detail = '';
+          try {
+            const errorPayload = await response.json();
+            detail = errorPayload.message || '';
+          } catch (error) {
+            detail = '';
+          }
+          throw new Error(`WebRTC offer failed (${response.status}) ${detail}`.trim());
         }
 
         const answer = await response.json();
@@ -177,6 +184,7 @@
 
         await peerConnection.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
       } catch (error) {
+        console.warn('WebRTC setup failed, using snapshot fallback:', error);
         enableSnapshotFallback();
       }
     }
