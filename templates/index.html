@@ -59,7 +59,7 @@
         }
 
         const payload = await response.json();
-        if (payload.status !== 'ok' || !payload.live) {
+        if (payload.status !== 'ok' || !payload.ready) {
           hideStream();
           return;
         }

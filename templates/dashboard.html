@@ -82,6 +82,7 @@
     const streamRefreshIntervalMs = 500;
     let dragging = false;
     let streamLive = false;
+    let streamReady = false;
     let hasActiveSession = false;
     let peerConnection = null;
     let usingWebRTC = false;
@@ -175,7 +176,7 @@
         streamVideo.srcObject = null;
       }
 
-      if (!hasActiveSession || !streamLive) {
+      if (!hasActiveSession || !streamReady) {
         hideStreamSurfaces();
         return;
       }
@@ -305,9 +306,10 @@
         renderRemainingSeconds(payload.remaining_seconds, payload.active, payload.billing_started);
         hasActiveSession = Boolean(payload.active);
         streamLive = Boolean(payload.stream_live);
+        streamReady = Boolean(payload.stream_ready);
         billingStarted = Boolean(payload.billing_started);
 
-        if (!hasActiveSession || !streamLive) {
+        if (!hasActiveSession || !streamReady) {
           hideStreamSurfaces();
         } else if (!usingWebRTC && streamImage && !streamImage.src) {
           streamImage.style.display = 'block';

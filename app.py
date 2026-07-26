@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
 from sqlite3 import dbapi2 as sqlite3
@@ -39,6 +40,8 @@ def create_app(test_config=None):
     app.config['BOARD_TOKEN'] = os.environ.get('BOARD_TOKEN', 'dev-board-token')
     app.config['SESSION_DURATION_SECONDS'] = int(os.environ.get('SESSION_DURATION_SECONDS', '300'))
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '6.0'))
+    app.config['STREAM_READY_WINDOW_SECONDS'] = max(1.0, float(os.environ.get('STREAM_READY_WINDOW_SECONDS', '2.0')))
+    app.config['STREAM_READY_MIN_FRAMES'] = max(2, int(os.environ.get('STREAM_READY_MIN_FRAMES', '6')))
     app.config['STREAM_LOSS_GRACE_SECONDS'] = float(os.environ.get('STREAM_LOSS_GRACE_SECONDS', '30.0'))
     app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
     app.config['STREAM_CROP_BOTTOM_PX'] = max(0, int(os.environ.get('STREAM_CROP_BOTTOM_PX', '2')))
@@ -206,6 +209,7 @@ def create_app(test_config=None):
     pipeline_frame_counter = 0
     app_state = {
         'last_stream_at': None,
+        'stream_frame_times': deque(maxlen=300),
         'board_last_seen_at': None,
         'board_last_source': None,
         'board_last_poll_at': None,
@@ -295,9 +299,25 @@ def create_app(test_config=None):
             return False
         return (now - last_stream_at).total_seconds() <= app.config['STREAM_STALE_SECONDS']
 
+    def is_stream_ready(now=None):
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if not is_stream_live(now):
+            return False
+
+        frame_times = app_state['stream_frame_times']
+        if not frame_times:
+            return False
+
+        window_seconds = float(app.config['STREAM_READY_WINDOW_SECONDS'])
+        cutoff = now - timedelta(seconds=window_seconds)
+        recent_frames = sum(1 for ts in frame_times if ts >= cutoff)
+        return recent_frames >= int(app.config['STREAM_READY_MIN_FRAMES'])
+
     def mark_stream_activity():
         now = datetime.now(timezone.utc)
         app_state['last_stream_at'] = now
+        app_state['stream_frame_times'].append(now)
 
     def h264_chunk_has_parameter_sets(data):
         # Annex-B NAL scan for SPS (7) and PPS (8). We decode only after both are seen.
@@ -729,6 +749,7 @@ def create_app(test_config=None):
                 'active': False,
                 'remaining_seconds': max(0, int(user['balance'])) if user else 0,
                 'stream_live': is_stream_live(),
+                'stream_ready': is_stream_ready(),
                 'billing_started': False,
             })
 
@@ -737,6 +758,7 @@ def create_app(test_config=None):
             'active': True,
             'remaining_seconds': get_remaining_seconds(session['user_id'], active_session),
             'stream_live': is_stream_live(),
+            'stream_ready': is_stream_ready(),
             'billing_started': active_session['billing_started_at'] is not None,
             'device': active_session['name'],
         })
@@ -752,7 +774,10 @@ def create_app(test_config=None):
         return jsonify({
             'status': 'ok',
             'live': is_stream_live(),
+            'ready': is_stream_ready(),
             'stale_after_seconds': app.config['STREAM_STALE_SECONDS'],
+            'ready_window_seconds': app.config['STREAM_READY_WINDOW_SECONDS'],
+            'ready_min_frames': app.config['STREAM_READY_MIN_FRAMES'],
         })
 
     @app.route('/api/session/start', methods=['POST'])
