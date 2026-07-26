@@ -57,6 +57,10 @@ H264_UPLOAD_MIN_FLUSH_BYTES = int(os.environ.get('H264_UPLOAD_MIN_FLUSH_BYTES', 
 H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '40'))
 H264_UPLOAD_QUEUE_MAX = max(1, int(os.environ.get('H264_UPLOAD_QUEUE_MAX', '3')))
 H264_UPLOAD_COALESCE_MAX_BYTES = max(1024, int(os.environ.get('H264_UPLOAD_COALESCE_MAX_BYTES', '262144')))
+H264_UPLOAD_COALESCE_MIN_BYTES = max(1024, int(os.environ.get('H264_UPLOAD_COALESCE_MIN_BYTES', '32768')))
+H264_UPLOAD_COALESCE_START_BYTES = max(1024, int(os.environ.get('H264_UPLOAD_COALESCE_START_BYTES', '65536')))
+H264_UPLOAD_ADAPTIVE_COALESCE = os.environ.get('H264_UPLOAD_ADAPTIVE_COALESCE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+H264_UPLOAD_ADAPT_TARGET_MS = max(20.0, float(os.environ.get('H264_UPLOAD_ADAPT_TARGET_MS', '140.0')))
 H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
 H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
@@ -356,7 +360,7 @@ def post_h264_with_retry(payload):
                     f'h264 upload slow bytes={len(payload)} attempts={attempts} elapsed_ms={elapsed_ms:.1f}',
                     file=sys.stderr,
                 )
-            return True
+            return True, elapsed_ms, attempts
         except Exception as exc:
             last_error = exc
             if attempts < max_attempts:
@@ -367,7 +371,7 @@ def post_h264_with_retry(payload):
 
     if last_error is not None:
         print(f'H264 upload failed: {last_error}', file=sys.stderr)
-    return False
+    return False, None, attempts
 
 
 def enqueue_h264_payload(upload_queue, payload):
@@ -393,6 +397,10 @@ def enqueue_h264_payload(upload_queue, payload):
 
 
 def h264_upload_worker(upload_queue, stop_event):
+    min_coalesce = min(H264_UPLOAD_COALESCE_MIN_BYTES, H264_UPLOAD_COALESCE_MAX_BYTES)
+    max_coalesce = max(min_coalesce, H264_UPLOAD_COALESCE_MAX_BYTES)
+    current_coalesce = max(min_coalesce, min(H264_UPLOAD_COALESCE_START_BYTES, max_coalesce))
+
     while not stop_event.is_set() or not upload_queue.empty():
         try:
             payload = upload_queue.get(timeout=0.2)
@@ -402,7 +410,7 @@ def h264_upload_worker(upload_queue, stop_event):
         # Merge adjacent queued buffers into a larger contiguous upload.
         # This lowers HTTP request overhead and preserves stream continuity.
         merged = bytearray(payload)
-        while len(merged) < H264_UPLOAD_COALESCE_MAX_BYTES:
+        while len(merged) < current_coalesce:
             try:
                 extra = upload_queue.get_nowait()
             except queue.Empty:
@@ -413,7 +421,31 @@ def h264_upload_worker(upload_queue, stop_event):
             merged.extend(extra)
 
         payload = bytes(merged)
-        post_h264_with_retry(payload)
+        before_upload_backlog = upload_queue.qsize()
+        ok, elapsed_ms, attempts = post_h264_with_retry(payload)
+
+        if not H264_UPLOAD_ADAPTIVE_COALESCE or elapsed_ms is None:
+            continue
+
+        new_coalesce = current_coalesce
+        high_ms = H264_UPLOAD_ADAPT_TARGET_MS * 1.20
+        low_ms = H264_UPLOAD_ADAPT_TARGET_MS * 0.70
+
+        if (before_upload_backlog > 0 and elapsed_ms >= H264_UPLOAD_ADAPT_TARGET_MS) or attempts > 1 or (not ok):
+            new_coalesce = min(max_coalesce, int(current_coalesce * 1.25))
+        elif elapsed_ms <= low_ms and before_upload_backlog == 0:
+            new_coalesce = max(min_coalesce, int(current_coalesce * 0.85))
+        elif elapsed_ms >= high_ms and before_upload_backlog > 0:
+            new_coalesce = min(max_coalesce, int(current_coalesce * 1.10))
+
+        if new_coalesce != current_coalesce:
+            current_coalesce = new_coalesce
+            if STREAM_PROFILE:
+                print(
+                    f'stream profile path=h264_hw adaptive_coalesce bytes={current_coalesce} '
+                    f'elapsed_ms={elapsed_ms:.1f} backlog={before_upload_backlog} attempts={attempts}',
+                    file=sys.stderr,
+                )
 
 
 def log_profile_summary(*, path, event_count, total_elapsed, read_elapsed=None, post_elapsed=None, encode_elapsed=None, upload_bytes=None, extra=None):
