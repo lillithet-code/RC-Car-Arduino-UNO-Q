@@ -161,6 +161,17 @@
             streamImage.style.display = 'none';
           }
           usingWebRTC = true;
+
+          const startPlayback = async () => {
+            try {
+              await streamVideo.play();
+            } catch (error) {
+              console.warn('WebRTC video play() blocked, will retry:', error);
+            }
+          };
+
+          startPlayback();
+          streamVideo.onloadedmetadata = startPlayback;
         };
 
         peerConnection.onconnectionstatechange = () => {
@@ -238,6 +249,9 @@
       pollSessionStatus();
       setInterval(pollSessionStatus, 1000);
       setInterval(() => {
+        if (usingWebRTC && streamVideo && streamVideo.paused) {
+          streamVideo.play().catch(() => {});
+        }
         if (hasActiveSession && streamLive && !usingWebRTC) {
           refreshStreamFrame();
         }
