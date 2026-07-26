@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
 import os
+import select
+import subprocess
 import sys
 import time
 from urllib import request as urllib_request
@@ -10,6 +12,7 @@ import cv2
 
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
 STREAM_ENDPOINT = f'{SERVER_BASE_URL}/api/video/pipeline/frame'
+STREAM_H264_ENDPOINT = f'{SERVER_BASE_URL}/api/video/h264/chunk'
 STREAM_STATUS_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/status'
 BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
 VIDEO_DEVICE = int(os.environ.get('VIDEO_DEVICE', '0'))
@@ -22,6 +25,13 @@ VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
 CAMERA_FOURCC = os.environ.get('CAMERA_FOURCC', 'MJPG').strip().upper()
 CAPTURE_BUFFER_SIZE = int(os.environ.get('CAPTURE_BUFFER_SIZE', '1'))
 STREAM_IDLE_POLL_SECONDS = float(os.environ.get('STREAM_IDLE_POLL_SECONDS', '2.0'))
+STREAM_PIPELINE = os.environ.get('STREAM_PIPELINE', 'auto').strip().lower()
+FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
+H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
+H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
+H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
+H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))) )
+H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '8192'))
 
 
 def open_capture(device_index):
@@ -65,10 +75,62 @@ def fetch_stream_enabled():
         return False
 
 
+def post_bytes(url, payload, content_type):
+    req = urllib_request.Request(
+        url,
+        data=payload,
+        headers={
+            'Content-Type': content_type,
+            'X-Board-Token': BOARD_TOKEN,
+        },
+        method='POST',
+    )
+    urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
+
+
+def start_h264_ffmpeg():
+    command = [
+        FFMPEG_BIN,
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-fflags', 'nobuffer',
+        '-f', 'v4l2',
+        '-input_format', CAMERA_FOURCC.lower(),
+        '-video_size', f'{VIDEO_WIDTH}x{VIDEO_HEIGHT}',
+        '-framerate', str(FRAME_RATE),
+        '-i', f'/dev/video{VIDEO_DEVICE}',
+        '-an',
+        '-c:v', 'h264_v4l2m2m',
+        '-pix_fmt', 'yuv420p',
+        '-g', str(max(1, H264_GOP)),
+        '-bf', '0',
+        '-b:v', H264_BITRATE,
+        '-maxrate', H264_MAXRATE,
+        '-bufsize', H264_BUFSIZE,
+        '-f', 'h264',
+        '-',
+    ]
+
+    print(f'starting h264 pipeline: {" ".join(command)}')
+    return subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+
+
 def main():
     cap = None
+    h264_process = None
     frame_period = 1.0 / max(FRAME_RATE, 1)
     last_enabled = None
+    selected_pipeline = STREAM_PIPELINE
+    if selected_pipeline == 'auto':
+        selected_pipeline = 'h264_hw'
+    if selected_pipeline not in {'h264_hw', 'mjpg'}:
+        selected_pipeline = 'mjpg'
+    print(f'selected stream pipeline: {selected_pipeline}')
 
     while True:
         stream_enabled = fetch_stream_enabled()
@@ -83,7 +145,41 @@ def main():
                 cap.release()
                 cap = None
                 print('camera released while idle')
+            if h264_process is not None:
+                h264_process.terminate()
+                h264_process = None
+                print('h264 encoder stopped while idle')
             time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
+            continue
+
+        if selected_pipeline == 'h264_hw':
+            if h264_process is None:
+                try:
+                    h264_process = start_h264_ffmpeg()
+                except Exception as exc:
+                    print(f'h264 pipeline start failed, fallback to mjpg: {exc}', file=sys.stderr)
+                    selected_pipeline = 'mjpg'
+                    continue
+
+            if h264_process.poll() is not None:
+                print('h264 encoder exited; restarting', file=sys.stderr)
+                h264_process = None
+                time.sleep(0.2)
+                continue
+
+            ready, _, _ = select.select([h264_process.stdout], [], [], 0.5)
+            if not ready:
+                continue
+
+            chunk = h264_process.stdout.read(max(1024, H264_CHUNK_BYTES))
+            if not chunk:
+                time.sleep(0.05)
+                continue
+
+            try:
+                post_bytes(STREAM_H264_ENDPOINT, chunk, 'video/h264')
+            except Exception as exc:
+                print(f'H264 upload failed: {exc}', file=sys.stderr)
             continue
 
         if cap is None:
@@ -102,14 +198,8 @@ def main():
 
         _, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), QUALITY])
         payload = encoded.tobytes()
-        req = urllib_request.Request(
-            STREAM_ENDPOINT,
-            data=payload,
-            headers={'Content-Type': 'image/jpeg', 'X-Board-Token': BOARD_TOKEN},
-            method='POST',
-        )
         try:
-            urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
+            post_bytes(STREAM_ENDPOINT, payload, 'image/jpeg')
         except Exception as exc:
             print(f'Upload failed: {exc}', file=sys.stderr)
 

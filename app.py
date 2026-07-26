@@ -10,7 +10,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 try:
     from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
-    from av import VideoFrame
+    from av import VideoFrame, CodecContext, Packet
     import cv2
     import numpy as np
     WEBRTC_AVAILABLE = True
@@ -21,6 +21,8 @@ except Exception:
     RTCConfiguration = None
     RTCIceServer = None
     VideoFrame = None
+    CodecContext = None
+    Packet = None
     cv2 = None
     np = None
     WEBRTC_AVAILABLE = False
@@ -178,6 +180,7 @@ def create_app(test_config=None):
     pipeline_frame_counter = 0
     app_state = {'last_stream_at': None}
     peer_connections = set()
+    h264_decoder = CodecContext.create('h264', 'r') if CodecContext is not None else None
 
     webrtc_loop = None
     if WEBRTC_AVAILABLE:
@@ -610,6 +613,47 @@ def create_app(test_config=None):
                 pass
         stream_queue.put(data)
         return jsonify({'status': 'ok', 'received': len(data), 'frame_id': pipeline_frame_counter})
+
+    @app.route('/api/video/h264/chunk', methods=['POST'])
+    def api_video_h264_chunk():
+        nonlocal latest_stream_chunk, pipeline_frame_counter
+
+        token = request.headers.get('X-Board-Token', '')
+        if token != app.config['BOARD_TOKEN']:
+            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
+
+        data = request.get_data()
+        if not data:
+            return jsonify({'status': 'error', 'message': 'chunk data is required'}), 400
+
+        if h264_decoder is None or cv2 is None:
+            return jsonify({'status': 'error', 'message': 'h264 decode not available'}), 503
+
+        mark_stream_activity()
+
+        decoded_any = False
+        try:
+            packets = [Packet(data)]
+            for packet in packets:
+                frames = h264_decoder.decode(packet)
+                for frame in frames:
+                    frame_bgr = frame.to_ndarray(format='bgr24')
+                    ok, encoded = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                    if not ok:
+                        continue
+                    latest_stream_chunk = encoded.tobytes()
+                    if stream_queue.full():
+                        try:
+                            stream_queue.get_nowait()
+                        except Empty:
+                            pass
+                    stream_queue.put(latest_stream_chunk)
+                    pipeline_frame_counter += 1
+                    decoded_any = True
+        except Exception as exc:
+            return jsonify({'status': 'error', 'message': f'h264 decode failed: {exc}'}), 400
+
+        return jsonify({'status': 'ok', 'decoded': decoded_any, 'frame_id': pipeline_frame_counter})
 
     @app.route('/video_feed')
     def video_feed():
