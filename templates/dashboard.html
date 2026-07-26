@@ -85,6 +85,7 @@
     let hasActiveSession = false;
     let peerConnection = null;
     let usingWebRTC = false;
+    let activeStreamId = null;
 
     function formatSeconds(totalSeconds) {
       const safe = Math.max(0, Number(totalSeconds) || 0);
@@ -155,7 +156,15 @@
 
         peerConnection.addTransceiver('video', { direction: 'recvonly' });
         peerConnection.ontrack = (event) => {
-          streamVideo.srcObject = event.streams[0];
+          const incomingStream = event.streams[0];
+          if (!incomingStream) {
+            return;
+          }
+
+          if (activeStreamId !== incomingStream.id) {
+            activeStreamId = incomingStream.id;
+            streamVideo.srcObject = incomingStream;
+          }
           streamVideo.style.display = 'block';
           if (streamImage) {
             streamImage.style.display = 'none';
@@ -166,6 +175,12 @@
             try {
               await streamVideo.play();
             } catch (error) {
+              if (error && error.name === 'AbortError') {
+                setTimeout(() => {
+                  streamVideo.play().catch(() => {});
+                }, 120);
+                return;
+              }
               console.warn('WebRTC video play() blocked, will retry:', error);
             }
           };
