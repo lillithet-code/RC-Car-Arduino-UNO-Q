@@ -1,10 +1,26 @@
 import os
+import asyncio
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Queue
 from sqlite3 import dbapi2 as sqlite3
 
 from flask import Flask, g, redirect, render_template, request, session, url_for, jsonify, Response
 from werkzeug.security import generate_password_hash, check_password_hash
+
+try:
+    from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from av import VideoFrame
+    import cv2
+    import numpy as np
+    WEBRTC_AVAILABLE = True
+except Exception:
+    RTCPeerConnection = None
+    RTCSessionDescription = None
+    VideoStreamTrack = None
+    VideoFrame = None
+    cv2 = None
+    np = None
+    WEBRTC_AVAILABLE = False
 
 
 def create_app(test_config=None):
@@ -157,6 +173,38 @@ def create_app(test_config=None):
     pending_commands = Queue()
     pipeline_frame_counter = 0
     app_state = {'last_stream_at': None}
+    peer_connections = set()
+
+    class StreamVideoTrack(VideoStreamTrack if WEBRTC_AVAILABLE else object):
+        def __init__(self, frame_provider, fallback_width=640, fallback_height=480, fps=20):
+            if WEBRTC_AVAILABLE:
+                super().__init__()
+            self._frame_provider = frame_provider
+            self._fps = max(1, int(fps))
+            self._frame_period = 1.0 / self._fps
+            self._fallback_frame = None
+            if WEBRTC_AVAILABLE and np is not None:
+                self._fallback_frame = np.zeros((fallback_height, fallback_width, 3), dtype=np.uint8)
+
+        async def recv(self):
+            await asyncio.sleep(self._frame_period)
+
+            chunk = self._frame_provider()
+            frame_array = None
+            if WEBRTC_AVAILABLE and chunk and cv2 is not None and np is not None:
+                encoded = np.frombuffer(chunk, dtype=np.uint8)
+                decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+                if decoded is not None:
+                    frame_array = decoded
+
+            if frame_array is None:
+                frame_array = self._fallback_frame
+
+            frame = VideoFrame.from_ndarray(frame_array, format='bgr24')
+            pts, time_base = await self.next_timestamp()
+            frame.pts = pts
+            frame.time_base = time_base
+            return frame
 
     def parse_timestamp(raw_value):
         if not raw_value:
@@ -356,6 +404,48 @@ def create_app(test_config=None):
             'billing_started': active_session['billing_started_at'] is not None,
             'device': active_session['name'],
         })
+
+    @app.route('/api/webrtc/offer', methods=['POST'])
+    def webrtc_offer():
+        if not WEBRTC_AVAILABLE:
+            return jsonify({'status': 'error', 'message': 'WebRTC backend not available'}), 503
+        if 'user_id' not in session:
+            return jsonify({'status': 'error', 'message': 'unauthorized'}), 401
+
+        active_session = get_active_session(session['user_id'])
+        if not active_session:
+            return jsonify({'status': 'error', 'message': 'no active session'}), 400
+
+        payload = request.get_json(silent=True) or {}
+        sdp = payload.get('sdp')
+        offer_type = payload.get('type')
+        if not sdp or not offer_type:
+            return jsonify({'status': 'error', 'message': 'invalid offer payload'}), 400
+
+        pc = RTCPeerConnection()
+        peer_connections.add(pc)
+
+        @pc.on('connectionstatechange')
+        async def on_connectionstatechange():
+            if pc.connectionState in {'failed', 'closed', 'disconnected'}:
+                await pc.close()
+                peer_connections.discard(pc)
+
+        track = StreamVideoTrack(lambda: latest_stream_chunk, fps=20)
+        pc.addTrack(track)
+
+        async def handle_offer():
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=offer_type))
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            return {
+                'status': 'ok',
+                'sdp': pc.localDescription.sdp,
+                'type': pc.localDescription.type,
+            }
+
+        result = asyncio.run(handle_offer())
+        return jsonify(result)
 
     @app.route('/admin', methods=['GET', 'POST'])
     def admin():

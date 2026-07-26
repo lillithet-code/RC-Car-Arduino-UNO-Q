@@ -58,7 +58,8 @@
         <p>Connected to {{ active_session.name }}. Your time is counting down live.</p>
         <div class="session-layout">
           <div class="video-panel">
-            <img id="stream-image" class="stream" src="{{ url_for('video_feed', mode='single') }}" alt="Live video stream">
+            <video id="stream-video" class="stream" autoplay playsinline muted></video>
+            <img id="stream-image" class="stream" src="{{ url_for('video_feed', mode='single') }}" alt="Live video stream fallback" style="display:none;">
           </div>
           <div class="joystick-panel">
             <div class="joystick" id="joystick">
@@ -74,6 +75,7 @@
   <script>
     const joystick = document.getElementById('joystick');
     const knob = document.getElementById('knob');
+    const streamVideo = document.getElementById('stream-video');
     const streamImage = document.getElementById('stream-image');
     const remainingTime = document.getElementById('remaining-time');
     const streamSingleBaseUrl = '{{ url_for('video_feed', mode='single') }}';
@@ -81,6 +83,8 @@
     let dragging = false;
     let streamLive = false;
     let hasActiveSession = false;
+    let peerConnection = null;
+    let usingWebRTC = false;
 
     function formatSeconds(totalSeconds) {
       const safe = Math.max(0, Number(totalSeconds) || 0);
@@ -112,6 +116,71 @@
       streamImage.src = `${streamSingleBaseUrl}&t=${Date.now()}`;
     }
 
+    function enableSnapshotFallback() {
+      usingWebRTC = false;
+      if (streamVideo) {
+        streamVideo.style.display = 'none';
+        streamVideo.srcObject = null;
+      }
+      if (streamImage) {
+        streamImage.style.display = 'block';
+      }
+    }
+
+    async function setupWebRTC() {
+      if (!window.RTCPeerConnection || !streamVideo) {
+        enableSnapshotFallback();
+        return;
+      }
+
+      try {
+        peerConnection = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        peerConnection.addTransceiver('video', { direction: 'recvonly' });
+        peerConnection.ontrack = (event) => {
+          streamVideo.srcObject = event.streams[0];
+          streamVideo.style.display = 'block';
+          if (streamImage) {
+            streamImage.style.display = 'none';
+          }
+          usingWebRTC = true;
+        };
+
+        peerConnection.onconnectionstatechange = () => {
+          if (['failed', 'closed', 'disconnected'].includes(peerConnection.connectionState)) {
+            enableSnapshotFallback();
+          }
+        };
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        const response = await fetch('/api/webrtc/offer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sdp: peerConnection.localDescription.sdp,
+            type: peerConnection.localDescription.type,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error('WebRTC offer failed');
+        }
+
+        const answer = await response.json();
+        if (answer.status !== 'ok' || !answer.sdp || !answer.type) {
+          throw new Error('Invalid WebRTC answer');
+        }
+
+        await peerConnection.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
+      } catch (error) {
+        enableSnapshotFallback();
+      }
+    }
+
     async function pollSessionStatus() {
       try {
         const response = await fetch('/api/session/status', { cache: 'no-store' });
@@ -127,7 +196,7 @@
         hasActiveSession = Boolean(payload.active);
         streamLive = Boolean(payload.stream_live);
 
-        if (hasActiveSession && streamLive) {
+        if (hasActiveSession && streamLive && !usingWebRTC) {
           refreshStreamFrame();
         }
 
@@ -140,11 +209,12 @@
     }
 
     if (streamImage || remainingTime) {
+      setupWebRTC();
       refreshStreamFrame();
       pollSessionStatus();
       setInterval(pollSessionStatus, 1000);
       setInterval(() => {
-        if (hasActiveSession && streamLive) {
+        if (hasActiveSession && streamLive && !usingWebRTC) {
           refreshStreamFrame();
         }
       }, streamRefreshIntervalMs);
