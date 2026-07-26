@@ -10,13 +10,69 @@
     img { width: 100%; max-width: 720px; border-radius: 12px; border: 2px solid #444; }
     h1 { margin-bottom: 0.5rem; }
     p { color: #ccc; }
+    .stream-waiting { color: #9ca3af; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>RC Car Arduino UNO Q Stream</h1>
-    <p>This page streams video from the connected camera source.</p>
-    <img src="{{ url_for('video_feed') }}" alt="Live video stream">
+    <p id="stream-status" class="stream-waiting">Waiting for live stream...</p>
+    <img id="stream-image" alt="Live video stream" style="display:none;">
   </div>
+  <script>
+    const streamImage = document.getElementById('stream-image');
+    const streamStatus = document.getElementById('stream-status');
+    const streamUrl = "{{ url_for('video_feed') }}";
+    const liveStatusUrl = '/api/stream/live';
+    let streamActive = false;
+
+    function hideStream() {
+      if (streamImage) {
+        streamImage.style.display = 'none';
+        if (streamImage.src) {
+          streamImage.removeAttribute('src');
+        }
+      }
+      if (streamStatus) {
+        streamStatus.textContent = 'Waiting for live stream...';
+      }
+      streamActive = false;
+    }
+
+    function showStream() {
+      if (streamImage && !streamActive) {
+        streamImage.style.display = 'block';
+        streamImage.src = streamUrl;
+      }
+      if (streamStatus) {
+        streamStatus.textContent = 'Live stream connected.';
+      }
+      streamActive = true;
+    }
+
+    async function pollStreamLive() {
+      try {
+        const response = await fetch(liveStatusUrl, { cache: 'no-store' });
+        if (!response.ok) {
+          hideStream();
+          return;
+        }
+
+        const payload = await response.json();
+        if (payload.status !== 'ok' || !payload.live) {
+          hideStream();
+          return;
+        }
+
+        showStream();
+      } catch (error) {
+        hideStream();
+      }
+    }
+
+    hideStream();
+    pollStreamLive();
+    setInterval(pollStreamLive, 1000);
+  </script>
 </body>
 </html>

@@ -58,7 +58,7 @@
         <p>Connected to {{ active_session.name }}. Your time is counting down live.</p>
         <div class="session-layout">
           <div class="video-panel">
-            <video id="stream-video" class="stream" autoplay playsinline muted></video>
+            <video id="stream-video" class="stream" autoplay playsinline muted style="display:none;"></video>
             <img id="stream-image" class="stream" alt="Live video stream fallback" style="display:none;">
           </div>
           <div class="joystick-panel">
@@ -89,6 +89,19 @@
     let billingStarted = false;
     let startRequestInFlight = false;
     let fallbackFrameRendered = false;
+
+    function hideStreamSurfaces() {
+      if (streamVideo) {
+        streamVideo.style.display = 'none';
+      }
+      if (streamImage) {
+        streamImage.style.display = 'none';
+        if (streamImage.src) {
+          streamImage.removeAttribute('src');
+        }
+      }
+      fallbackFrameRendered = false;
+    }
 
     function formatSeconds(totalSeconds) {
       const safe = Math.max(0, Number(totalSeconds) || 0);
@@ -161,6 +174,12 @@
         streamVideo.style.display = 'none';
         streamVideo.srcObject = null;
       }
+
+      if (!hasActiveSession || !streamLive) {
+        hideStreamSurfaces();
+        return;
+      }
+
       if (streamImage) {
         streamImage.style.display = 'block';
         if (streamImage.src !== streamMjpegBaseUrl) {
@@ -288,6 +307,13 @@
         streamLive = Boolean(payload.stream_live);
         billingStarted = Boolean(payload.billing_started);
 
+        if (!hasActiveSession || !streamLive) {
+          hideStreamSurfaces();
+        } else if (!usingWebRTC && streamImage && !streamImage.src) {
+          streamImage.style.display = 'block';
+          streamImage.src = streamMjpegBaseUrl;
+        }
+
         if (!usingWebRTC && hasActiveSession && streamLive) {
           maybeStartSessionBilling();
         }
@@ -301,6 +327,7 @@
     }
 
     if (streamImage || remainingTime) {
+      hideStreamSurfaces();
       if (streamImage) {
         streamImage.addEventListener('load', () => {
           fallbackFrameRendered = true;

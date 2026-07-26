@@ -747,6 +747,14 @@ def create_app(test_config=None):
         db.execute('SELECT 1')
         return jsonify({'status': 'ok'})
 
+    @app.route('/api/stream/live')
+    def stream_live_status():
+        return jsonify({
+            'status': 'ok',
+            'live': is_stream_live(),
+            'stale_after_seconds': app.config['STREAM_STALE_SECONDS'],
+        })
+
     @app.route('/api/session/start', methods=['POST'])
     def session_start():
         if 'user_id' not in session:
