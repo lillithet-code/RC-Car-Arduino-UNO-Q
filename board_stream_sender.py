@@ -43,12 +43,13 @@ H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
-H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '8192'))
+H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '65536'))
 H264_INPUT_FORMATS = os.environ.get('H264_INPUT_FORMATS', '').strip()
 H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
 H264_ENCODERS = os.environ.get('H264_ENCODERS', 'h264_v4l2m2m,h264_omx').strip()
 H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536'))
-H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
+H264_UPLOAD_MIN_FLUSH_BYTES = int(os.environ.get('H264_UPLOAD_MIN_FLUSH_BYTES', '16384'))
+H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '120'))
 H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
 H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
@@ -487,6 +488,7 @@ def main():
     h264_started_at = None
     h264_last_chunk_at = None
     h264_batch_bytes = max(1024, H264_UPLOAD_BATCH_BYTES)
+    h264_min_flush_bytes = max(1024, min(h264_batch_bytes, H264_UPLOAD_MIN_FLUSH_BYTES))
     h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
     next_video_probe_at = 0.0
     poll_count = 0
@@ -686,7 +688,10 @@ def main():
             h264_upload_buffer.extend(chunk)
             should_flush = (
                 len(h264_upload_buffer) >= h264_batch_bytes
-                or (time.monotonic() - h264_last_upload) >= h264_max_delay
+                or (
+                    len(h264_upload_buffer) >= h264_min_flush_bytes
+                    and (time.monotonic() - h264_last_upload) >= h264_max_delay
+                )
             )
 
             if not should_flush:
