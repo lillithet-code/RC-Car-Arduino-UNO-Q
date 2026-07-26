@@ -41,6 +41,7 @@ def create_app(test_config=None):
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '6.0'))
     app.config['STREAM_LOSS_GRACE_SECONDS'] = float(os.environ.get('STREAM_LOSS_GRACE_SECONDS', '30.0'))
     app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
+    app.config['STREAM_CROP_BOTTOM_PX'] = max(0, int(os.environ.get('STREAM_CROP_BOTTOM_PX', '2')))
     app.config['STREAM_PROFILE'] = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
     app.config['BOARD_POLL_URL'] = os.environ.get('BOARD_POLL_URL', '').strip()
     app.config['BOARD_POLL_INTERVAL_SECONDS'] = max(1.0, float(os.environ.get('BOARD_POLL_INTERVAL_SECONDS', '2.0')))
@@ -955,6 +956,9 @@ def create_app(test_config=None):
 
         if latest_decoded_frame is not None:
             frame_bgr = latest_decoded_frame.to_ndarray(format='bgr24')
+            crop_bottom = int(app.config.get('STREAM_CROP_BOTTOM_PX', 0) or 0)
+            if crop_bottom > 0 and frame_bgr.shape[0] > crop_bottom:
+                frame_bgr = frame_bgr[:-crop_bottom, :]
             ok, encoded = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
             if ok:
                 latest_stream_chunk = encoded.tobytes()

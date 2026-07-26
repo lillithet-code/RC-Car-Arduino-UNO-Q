@@ -56,6 +56,7 @@ H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536')
 H264_UPLOAD_MIN_FLUSH_BYTES = int(os.environ.get('H264_UPLOAD_MIN_FLUSH_BYTES', '16384'))
 H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '40'))
 H264_UPLOAD_QUEUE_MAX = max(1, int(os.environ.get('H264_UPLOAD_QUEUE_MAX', '3')))
+H264_UPLOAD_COALESCE_MAX_BYTES = max(1024, int(os.environ.get('H264_UPLOAD_COALESCE_MAX_BYTES', '262144')))
 H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
 H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
@@ -398,6 +399,20 @@ def h264_upload_worker(upload_queue, stop_event):
         except queue.Empty:
             continue
 
+        # Merge adjacent queued buffers into a larger contiguous upload.
+        # This lowers HTTP request overhead and preserves stream continuity.
+        merged = bytearray(payload)
+        while len(merged) < H264_UPLOAD_COALESCE_MAX_BYTES:
+            try:
+                extra = upload_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if not extra:
+                continue
+            merged.extend(extra)
+
+        payload = bytes(merged)
         post_h264_with_retry(payload)
 
 
