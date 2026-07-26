@@ -51,6 +51,7 @@ H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536')
 H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
 H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
 H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
+VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
 STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
 STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
@@ -154,7 +155,16 @@ def resolve_working_video_device(preferred_index=None):
         if probe_video_device(index):
             return index
 
-    return preferred_index
+    return None
+
+
+def classify_camera_error(stderr_output):
+    normalized_error = (stderr_output or '').lower()
+    if any(marker in normalized_error for marker in ('device or resource busy', 'resource busy')):
+        return 'busy'
+    if any(marker in normalized_error for marker in ('not a video capture device', 'no such device', 'error opening input')):
+        return 'missing'
+    return 'other'
 
 
 def get_h264_encoders():
@@ -316,6 +326,9 @@ def log_profile_event(*, path, message):
 
 
 def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
+    if video_device_index is None:
+        raise RuntimeError('cannot start h264 pipeline without a valid video device index')
+
     encoder_mode = H264_ENCODER_MODE
     if encoder_mode not in {'auto', 'copy', 'transcode'}:
         encoder_mode = 'auto'
@@ -393,8 +406,6 @@ def main():
     strict_hardware_only = selected_pipeline == 'h264_hw_strict'
     preferred_video_device, auto_video_select = parse_video_device_setting(VIDEO_DEVICE_SETTING)
     active_video_device = resolve_working_video_device(preferred_video_device)
-    if active_video_device is None:
-        active_video_device = 0
     print(
         f'video device strategy: setting={VIDEO_DEVICE_SETTING} auto_select={auto_video_select} '
         f'auto_recover={VIDEO_DEVICE_AUTO_RECOVER} active_device={active_video_device}'
@@ -417,6 +428,7 @@ def main():
     h264_last_chunk_at = None
     h264_batch_bytes = max(1024, H264_UPLOAD_BATCH_BYTES)
     h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
+    next_video_probe_at = 0.0
     poll_count = 0
 
     while True:
@@ -447,11 +459,28 @@ def main():
         if selected_pipeline in {'h264_hw', 'h264_hw_strict'}:
             if h264_process is None:
                 try:
-                    if auto_video_select or VIDEO_DEVICE_AUTO_RECOVER:
+                    now_monotonic = time.monotonic()
+                    should_probe = (
+                        active_video_device is None
+                        or auto_video_select
+                        or VIDEO_DEVICE_AUTO_RECOVER
+                    )
+                    if should_probe and now_monotonic >= next_video_probe_at:
                         detected_device = resolve_working_video_device(active_video_device)
                         if detected_device != active_video_device:
                             print(f'switching video device from {active_video_device} to {detected_device}')
                             active_video_device = detected_device
+                    elif should_probe and active_video_device is None:
+                        time.sleep(0.1)
+                        continue
+
+                    if active_video_device is None:
+                        if now_monotonic >= next_video_probe_at:
+                            print('no working camera detected; delaying h264 start until a device is available', file=sys.stderr)
+                            next_video_probe_at = now_monotonic + VIDEO_REPROBE_DELAY_SECONDS
+                        time.sleep(0.1)
+                        continue
+
                     active_input = h264_input_formats[h264_input_index]
                     active_encoder = h264_encoders[h264_encoder_index]
                     h264_process = start_h264_ffmpeg(active_input, active_encoder, active_video_device)
@@ -480,15 +509,23 @@ def main():
                 else:
                     print('h264 encoder exited; restarting', file=sys.stderr)
 
-                normalized_error = stderr_output.lower()
-                if VIDEO_DEVICE_AUTO_RECOVER and any(
-                    marker in normalized_error
-                    for marker in ('not a video capture device', 'no such device', 'error opening input')
-                ):
-                    recovered_device = resolve_working_video_device(preferred_video_device)
-                    if recovered_device != active_video_device:
-                        print(f'camera node changed; switching video device from {active_video_device} to {recovered_device}', file=sys.stderr)
-                        active_video_device = recovered_device
+                camera_error_kind = classify_camera_error(stderr_output)
+                if VIDEO_DEVICE_AUTO_RECOVER and camera_error_kind in {'busy', 'missing'}:
+                    if camera_error_kind == 'busy':
+                        print(
+                            f'camera /dev/video{active_video_device} busy; forcing reprobe after backoff',
+                            file=sys.stderr,
+                        )
+                    previous_device = active_video_device
+                    active_video_device = resolve_working_video_device(preferred_video_device)
+                    if active_video_device != previous_device:
+                        print(
+                            f'camera node changed; switching video device from {previous_device} to {active_video_device}',
+                            file=sys.stderr,
+                        )
+                    if active_video_device is None:
+                        print('no working camera detected after encoder failure; waiting before retry', file=sys.stderr)
+                    next_video_probe_at = time.monotonic() + VIDEO_REPROBE_DELAY_SECONDS
 
                 h264_process = None
                 h264_started_at = None
@@ -639,6 +676,10 @@ def main():
                 if detected_device != active_video_device:
                     print(f'switching video device from {active_video_device} to {detected_device}')
                     active_video_device = detected_device
+
+            if active_video_device is None:
+                time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
+                continue
 
             cap = open_capture(active_video_device)
             if not cap.isOpened():
