@@ -55,6 +55,47 @@ STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEART
 _UPLOAD_CONNECTION = None
 _UPLOAD_CONNECTION_KEY = None
 
+INPUT_FORMAT_ALIASES = {
+    'mjpg': 'mjpeg',
+    'mjpeg': 'mjpeg',
+    'yuyv': 'yuyv422',
+    'yuyv422': 'yuyv422',
+    'uyvy': 'uyvy422',
+    'uyvy422': 'uyvy422',
+}
+
+
+def normalize_input_format(value):
+    raw = (value or '').strip().lower()
+    return INPUT_FORMAT_ALIASES.get(raw, raw)
+
+
+def get_available_h264_encoders():
+    try:
+        result = subprocess.run(
+            [FFMPEG_BIN, '-hide_banner', '-encoders'],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        output = result.stdout or ''
+    except Exception:
+        return set()
+
+    available = set()
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith('Encoders:'):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        encoder_name = parts[1].strip()
+        if encoder_name.startswith('h264_'):
+            available.add(encoder_name)
+    return available
+
 
 def parse_video_device_setting(value):
     normalized = (value or '').strip().lower()
@@ -118,16 +159,24 @@ def get_h264_encoders():
     values = [item.strip() for item in H264_ENCODERS.split(',') if item.strip()]
     if not values:
         return ['h264_v4l2m2m']
+
+    available = get_available_h264_encoders()
+    if not available:
+        return values
+
+    filtered = [encoder for encoder in values if encoder in available]
+    if filtered:
+        return filtered
     return values
 
 
 def get_h264_input_formats():
     if H264_INPUT_FORMATS:
-        values = [item.strip().lower() for item in H264_INPUT_FORMATS.split(',') if item.strip()]
+        values = [normalize_input_format(item) for item in H264_INPUT_FORMATS.split(',') if item.strip()]
         if values:
             return values
 
-    defaults = [CAMERA_FOURCC.lower(), 'yuyv422', 'uyvy422']
+    defaults = [normalize_input_format(CAMERA_FOURCC), 'yuyv422', 'uyvy422']
     ordered = []
     for item in defaults:
         if item not in ordered:
