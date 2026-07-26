@@ -32,6 +32,21 @@ H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))) )
 H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '8192'))
+H264_INPUT_FORMATS = os.environ.get('H264_INPUT_FORMATS', '').strip()
+
+
+def get_h264_input_formats():
+    if H264_INPUT_FORMATS:
+        values = [item.strip().lower() for item in H264_INPUT_FORMATS.split(',') if item.strip()]
+        if values:
+            return values
+
+    defaults = [CAMERA_FOURCC.lower(), 'yuyv422', 'uyvy422']
+    ordered = []
+    for item in defaults:
+        if item not in ordered:
+            ordered.append(item)
+    return ordered
 
 
 def open_capture(device_index):
@@ -88,20 +103,21 @@ def post_bytes(url, payload, content_type):
     urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
 
 
-def start_h264_ffmpeg():
+def start_h264_ffmpeg(input_format):
     command = [
         FFMPEG_BIN,
         '-hide_banner',
         '-loglevel', 'error',
         '-fflags', 'nobuffer',
         '-f', 'v4l2',
-        '-input_format', CAMERA_FOURCC.lower(),
+        '-input_format', input_format,
         '-video_size', f'{VIDEO_WIDTH}x{VIDEO_HEIGHT}',
         '-framerate', str(FRAME_RATE),
         '-i', f'/dev/video{VIDEO_DEVICE}',
         '-an',
+        '-vf', 'format=nv12',
         '-c:v', 'h264_v4l2m2m',
-        '-pix_fmt', 'yuv420p',
+        '-pix_fmt', 'nv12',
         '-g', str(max(1, H264_GOP)),
         '-bf', '0',
         '-b:v', H264_BITRATE,
@@ -111,7 +127,7 @@ def start_h264_ffmpeg():
         '-',
     ]
 
-    print(f'starting h264 pipeline: {" ".join(command)}')
+    print(f'starting h264 pipeline input_format={input_format}: {" ".join(command)}')
     return subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -125,12 +141,17 @@ def main():
     h264_process = None
     frame_period = 1.0 / max(FRAME_RATE, 1)
     last_enabled = None
+    h264_input_formats = get_h264_input_formats()
+    h264_input_index = 0
     selected_pipeline = STREAM_PIPELINE
     if selected_pipeline == 'auto':
         selected_pipeline = 'h264_hw'
     if selected_pipeline not in {'h264_hw', 'mjpg'}:
         selected_pipeline = 'mjpg'
-    print(f'selected stream pipeline: {selected_pipeline}')
+    print(
+        f'selected stream pipeline: {selected_pipeline} '
+        f'h264_input_formats={"|".join(h264_input_formats)}'
+    )
     h264_failures = 0
 
     while True:
@@ -156,7 +177,8 @@ def main():
         if selected_pipeline == 'h264_hw':
             if h264_process is None:
                 try:
-                    h264_process = start_h264_ffmpeg()
+                    active_input = h264_input_formats[h264_input_index]
+                    h264_process = start_h264_ffmpeg(active_input)
                     h264_failures = 0
                 except Exception as exc:
                     print(f'h264 pipeline start failed, fallback to mjpg: {exc}', file=sys.stderr)
@@ -178,6 +200,12 @@ def main():
                     print('h264 encoder exited; restarting', file=sys.stderr)
 
                 h264_process = None
+                if h264_input_formats:
+                    h264_input_index = (h264_input_index + 1) % len(h264_input_formats)
+                    print(
+                        f'rotating h264 input format to {h264_input_formats[h264_input_index]}',
+                        file=sys.stderr,
+                    )
                 if h264_failures >= 5:
                     print('h264 encoder repeatedly failed; falling back to mjpg pipeline', file=sys.stderr)
                     selected_pipeline = 'mjpg'

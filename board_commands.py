@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import time
+from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 try:
@@ -16,6 +17,7 @@ SERIAL_PORT = os.environ.get('SERIAL_PORT', '/dev/ttyACM0')
 SERIAL_BAUD_RATE = int(os.environ.get('SERIAL_BAUD_RATE', '9600'))
 SERIAL_RETRY_SECONDS = float(os.environ.get('SERIAL_RETRY_SECONDS', '1.0'))
 SERIAL_EXCLUSIVE = os.environ.get('SERIAL_EXCLUSIVE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+COMMAND_BRIDGE = os.environ.get('COMMAND_BRIDGE', '').strip()
 BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
 BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
 
@@ -47,19 +49,91 @@ def fetch_command():
         return None
 
 
+def resolve_command_target():
+    target = COMMAND_BRIDGE or SERIAL_PORT
+    value = (target or '').strip()
+
+    if not value or value.lower() in {'off', 'none', 'disabled'}:
+        return {'transport': 'disabled', 'target': value}
+
+    parsed = urllib_parse.urlparse(value)
+    if parsed.scheme == 'tcp':
+        if not parsed.hostname or not parsed.port:
+            raise ValueError(f'invalid tcp bridge target: {value}')
+        return {'transport': 'tcp', 'host': parsed.hostname, 'port': parsed.port, 'target': value}
+    if parsed.scheme == 'udp':
+        if not parsed.hostname or not parsed.port:
+            raise ValueError(f'invalid udp bridge target: {value}')
+        return {'transport': 'udp', 'host': parsed.hostname, 'port': parsed.port, 'target': value}
+    if parsed.scheme == 'unix':
+        socket_path = parsed.path or parsed.netloc
+        if not socket_path:
+            raise ValueError(f'invalid unix bridge target: {value}')
+        return {'transport': 'unix', 'path': socket_path, 'target': value}
+
+    return {'transport': 'serial', 'port': value, 'target': value}
+
+
+TARGET_CONFIG = resolve_command_target()
+
+
 def send_command(action, port=SERIAL_PORT, baud_rate=SERIAL_BAUD_RATE):
     command = action_to_serial_command(action)
     if not command:
         return False
+    transport = TARGET_CONFIG.get('transport')
+    payload = command.encode('ascii')
+
+    if transport == 'disabled':
+        return False
+
+    if transport == 'tcp':
+        with socket.create_connection((TARGET_CONFIG['host'], TARGET_CONFIG['port']), timeout=1.5) as connection:
+            connection.sendall(payload)
+        return True
+
+    if transport == 'udp':
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+            connection.sendto(payload, (TARGET_CONFIG['host'], TARGET_CONFIG['port']))
+        return True
+
+    if transport == 'unix':
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1.5)
+            connection.connect(TARGET_CONFIG['path'])
+            connection.sendall(payload)
+        return True
+
     if serial is None:
         raise RuntimeError('pyserial is required to send commands to the Arduino')
 
     with serial.Serial(port, baud_rate, timeout=1) as connection:
-        connection.write(command.encode('ascii'))
+        connection.write(payload)
     return True
 
 
-def open_serial_connection(port=SERIAL_PORT, baud_rate=SERIAL_BAUD_RATE):
+def open_command_connection(port=SERIAL_PORT, baud_rate=SERIAL_BAUD_RATE):
+    transport = TARGET_CONFIG.get('transport')
+
+    if transport == 'disabled':
+        return None
+
+    if transport == 'tcp':
+        connection = socket.create_connection((TARGET_CONFIG['host'], TARGET_CONFIG['port']), timeout=2)
+        connection.settimeout(1.0)
+        return connection
+
+    if transport == 'udp':
+        connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        connection.settimeout(1.0)
+        return connection
+
+    if transport == 'unix':
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(2.0)
+        connection.connect(TARGET_CONFIG['path'])
+        return connection
+
     if serial is None:
         raise RuntimeError('pyserial is required to send commands to the Arduino')
 
@@ -88,7 +162,20 @@ def send_command_on_connection(action, connection):
     command = action_to_serial_command(action)
     if not command:
         return False
-    connection.write(command.encode('ascii'))
+
+    transport = TARGET_CONFIG.get('transport')
+    payload = command.encode('ascii')
+
+    if transport == 'disabled':
+        return False
+    if transport == 'udp':
+        connection.sendto(payload, (TARGET_CONFIG['host'], TARGET_CONFIG['port']))
+        return True
+    if transport in {'tcp', 'unix'}:
+        connection.sendall(payload)
+        return True
+
+    connection.write(payload)
     return True
 
 
@@ -118,13 +205,23 @@ def main():
 
     register_device()
 
+    transport = TARGET_CONFIG.get('transport')
+    target = TARGET_CONFIG.get('target')
+    if transport == 'disabled':
+        print('command transport disabled; commands will be ignored')
+    else:
+        print(f'command transport={transport} target={target}')
+
     while True:
-        if connection is None:
+        if transport != 'disabled' and connection is None:
             try:
-                connection = open_serial_connection()
-                print(f'serial connected: {SERIAL_PORT} @ {SERIAL_BAUD_RATE}')
+                connection = open_command_connection()
+                if transport == 'serial':
+                    print(f'serial connected: {SERIAL_PORT} @ {SERIAL_BAUD_RATE}')
+                else:
+                    print(f'bridge connected: {target}')
             except Exception as exc:  # pragma: no cover - runtime path
-                print(f'serial connect failed: {exc}')
+                print(f'command connect failed: {exc}')
                 time.sleep(max(SERIAL_RETRY_SECONDS, 0.1))
                 continue
 
@@ -135,10 +232,11 @@ def main():
                     print(action)
             except Exception as exc:  # pragma: no cover - runtime path
                 print(f'command failed: {exc}')
-                try:
-                    connection.close()
-                except Exception:
-                    pass
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
                 connection = None
         time.sleep(0.05)
 
