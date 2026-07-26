@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -107,6 +108,35 @@ def test_request_car_does_not_double_charge_with_active_session(client):
     second_request = client.post('/request_car')
     assert second_request.status_code == 200
     assert b'You already have an active session' in second_request.data
+
+
+def test_release_car_refunds_unused_time(client):
+    client.post('/register', data={
+        'username': 'erin',
+        'password': 'secret123',
+        'email': 'erin@example.com'
+    })
+    client.post('/login', data={
+        'username': 'erin',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-erin',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+
+    first_request = client.post('/request_car')
+    assert first_request.status_code == 200
+
+    release_response = client.post('/release_car', follow_redirects=True)
+    assert release_response.status_code == 200
+    html = release_response.data.decode('utf-8')
+    match = re.search(r'Remaining time:\s*<span[^>]*>(\d+)s</span>', html)
+    assert match is not None
+    assert int(match.group(1)) > 300
 
 
 def test_stream_chunk_endpoint_and_video_feed(client):

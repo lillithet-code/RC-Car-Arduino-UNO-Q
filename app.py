@@ -265,8 +265,13 @@ def create_app(test_config=None):
         db = get_db()
         active_session = get_active_session(session['user_id'])
         if active_session:
+            now = datetime.now(timezone.utc)
+            expires_at = datetime.strptime(active_session['expires_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            refundable_seconds = max(0, int((expires_at - now).total_seconds()))
             db.execute("UPDATE sessions SET status = 'released' WHERE id = ?", (active_session['id'],))
             db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (active_session['device_id'],))
+            if refundable_seconds > 0:
+                db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refundable_seconds, session['user_id']))
             db.commit()
         return redirect(url_for('index'))
 
