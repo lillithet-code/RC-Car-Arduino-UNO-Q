@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import socket
 import time
 from urllib import request as urllib_request
 
@@ -15,6 +16,8 @@ SERIAL_PORT = os.environ.get('SERIAL_PORT', '/dev/ttyACM0')
 SERIAL_BAUD_RATE = int(os.environ.get('SERIAL_BAUD_RATE', '9600'))
 SERIAL_RETRY_SECONDS = float(os.environ.get('SERIAL_RETRY_SECONDS', '1.0'))
 SERIAL_EXCLUSIVE = os.environ.get('SERIAL_EXCLUSIVE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
+BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
 
 COMMAND_MAP = {
     'forward': 'F',
@@ -89,8 +92,31 @@ def send_command_on_connection(action, connection):
     return True
 
 
+def register_device():
+    url = f'{SERVER_BASE_URL}/api/devices/register'
+    payload = json.dumps({
+        'name': BOARD_NAME,
+        'kind': 'arduino',
+        'location': BOARD_LOCATION,
+    }).encode('utf-8')
+    req = urllib_request.Request(
+        url,
+        data=payload,
+        headers={'Content-Type': 'application/json', 'User-Agent': 'RC-Car-Board/1.0'},
+        method='POST',
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=3):
+            return True
+    except Exception as exc:
+        print(f'device register failed: {exc}')
+        return False
+
+
 def main():
     connection = None
+
+    register_device()
 
     while True:
         if connection is None:
