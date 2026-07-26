@@ -8,7 +8,7 @@ from flask import Flask, g, redirect, render_template, request, session, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
 
 try:
-    from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
     from av import VideoFrame
     import cv2
     import numpy as np
@@ -17,6 +17,8 @@ except Exception:
     RTCPeerConnection = None
     RTCSessionDescription = None
     VideoStreamTrack = None
+    RTCConfiguration = None
+    RTCIceServer = None
     VideoFrame = None
     cv2 = None
     np = None
@@ -422,7 +424,11 @@ def create_app(test_config=None):
         if not sdp or not offer_type:
             return jsonify({'status': 'error', 'message': 'invalid offer payload'}), 400
 
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(
+            RTCConfiguration(
+                iceServers=[RTCIceServer(urls=['stun:stun.l.google.com:19302'])]
+            )
+        )
         peer_connections.add(pc)
 
         @pc.on('connectionstatechange')
@@ -438,6 +444,17 @@ def create_app(test_config=None):
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=offer_type))
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
+
+            if pc.iceGatheringState != 'complete':
+                gather_complete = asyncio.Event()
+
+                @pc.on('icegatheringstatechange')
+                async def on_ice_gathering_state_change():
+                    if pc.iceGatheringState == 'complete':
+                        gather_complete.set()
+
+                await gather_complete.wait()
+
             return {
                 'status': 'ok',
                 'sdp': pc.localDescription.sdp,

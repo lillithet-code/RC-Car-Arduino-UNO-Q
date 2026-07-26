@@ -138,6 +138,21 @@
           iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
 
+        const waitForIceGatheringComplete = (pc) => {
+          if (pc.iceGatheringState === 'complete') {
+            return Promise.resolve();
+          }
+          return new Promise((resolve) => {
+            const checkState = () => {
+              if (pc.iceGatheringState === 'complete') {
+                pc.removeEventListener('icegatheringstatechange', checkState);
+                resolve();
+              }
+            };
+            pc.addEventListener('icegatheringstatechange', checkState);
+          });
+        };
+
         peerConnection.addTransceiver('video', { direction: 'recvonly' });
         peerConnection.ontrack = (event) => {
           streamVideo.srcObject = event.streams[0];
@@ -156,6 +171,7 @@
 
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
+        await waitForIceGatheringComplete(peerConnection);
 
         const response = await fetch('/api/webrtc/offer', {
           method: 'POST',
