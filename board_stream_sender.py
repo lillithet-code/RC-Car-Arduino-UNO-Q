@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import ssl
+import socket
 from urllib import request as urllib_request
 from urllib import parse as urllib_parse
 
@@ -22,6 +23,7 @@ STREAM_ENDPOINT = f'{SERVER_BASE_URL}/api/video/pipeline/frame'
 STREAM_H264_ENDPOINT = f'{SERVER_BASE_URL}/api/video/h264/chunk'
 STREAM_STATUS_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/status'
 BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
+BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
 VIDEO_DEVICE = int(os.environ.get('VIDEO_DEVICE', '0'))
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '25'))
 QUALITY = int(os.environ.get('JPEG_QUALITY', '70'))
@@ -102,7 +104,8 @@ def open_capture(device_index):
 
 
 def fetch_stream_enabled():
-    url = f'{STREAM_STATUS_ENDPOINT}?token={BOARD_TOKEN}'
+    board_name = urllib_parse.quote(BOARD_NAME, safe='')
+    url = f'{STREAM_STATUS_ENDPOINT}?token={BOARD_TOKEN}&board_name={board_name}'
     req = urllib_request.Request(url, headers={'User-Agent': 'RC-Car-Board-Stream/1.0'})
     try:
         with urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0)) as response:
@@ -156,6 +159,7 @@ def post_bytes(url, payload, content_type):
         'Content-Length': str(len(payload)),
         'Connection': 'keep-alive',
         'X-Board-Token': BOARD_TOKEN,
+        'X-Board-Name': BOARD_NAME,
     }
 
     try:

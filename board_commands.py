@@ -55,7 +55,8 @@ def action_to_serial_command(action):
 
 
 def fetch_command():
-    url = f'{SERVER_BASE_URL}/api/board/command?token={BOARD_TOKEN}'
+    board_name = urllib_parse.quote(BOARD_NAME, safe='')
+    url = f'{SERVER_BASE_URL}/api/board/command?token={BOARD_TOKEN}&board_name={board_name}'
     req = urllib_request.Request(url, headers={'User-Agent': 'RC-Car-Board/1.0'})
     try:
         with urllib_request.urlopen(req, timeout=1) as response:

@@ -25,6 +25,11 @@ def client():
     os.unlink(db_path)
 
 
+def mark_board_online(client, board_name):
+    response = client.get(f'/api/board/stream/status?token=dev-board-token&board_name={board_name}')
+    assert response.status_code == 200
+
+
 def test_register_and_login(client):
     response = client.post('/register', data={
         'username': 'alice',
@@ -78,6 +83,8 @@ def test_device_registration_and_booking(client):
     assert payload['status'] == 'registered'
     assert payload['device']['name'] == 'rc-car-1'
 
+    mark_board_online(client, 'rc-car-1')
+
     response = client.post('/request_car')
     assert response.status_code == 200
     assert b'Control session started' in response.data
@@ -100,6 +107,7 @@ def test_request_car_does_not_double_charge_with_active_session(client):
         'location': 'garage'
     })
     assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-dave')
 
     first_request = client.post('/request_car')
     assert first_request.status_code == 200
@@ -127,6 +135,7 @@ def test_release_car_refunds_unused_time(client):
         'location': 'garage'
     })
     assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-erin')
 
     first_request = client.post('/request_car')
     assert first_request.status_code == 200
@@ -156,6 +165,7 @@ def test_session_countdown_starts_after_stream_appears(client):
         'location': 'garage'
     })
     assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-frank')
 
     request_response = client.post('/request_car')
     assert request_response.status_code == 200
@@ -204,6 +214,7 @@ def test_stream_loss_refunds_and_allows_new_request(client):
         'location': 'garage'
     })
     assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-gary')
 
     first_request = client.post('/request_car')
     assert first_request.status_code == 200
@@ -227,6 +238,7 @@ def test_stream_loss_refunds_and_allows_new_request(client):
         'location': 'garage'
     })
     assert second_register_response.status_code == 200
+    mark_board_online(client, 'rc-car-gary-2')
 
     second_request = client.post('/request_car')
     assert second_request.status_code == 200
@@ -249,6 +261,7 @@ def test_request_car_allows_partial_session_when_balance_under_default(client):
         'kind': 'arduino',
         'location': 'garage'
     })
+    mark_board_online(client, 'rc-car-helen')
 
     # Reduce user balance below default session duration.
     with client.application.app_context():
@@ -332,6 +345,7 @@ def test_board_stream_status_reflects_active_sessions(client):
         'kind': 'arduino',
         'location': 'garage'
     })
+    mark_board_online(client, 'rc-car-ivy')
     client.post('/request_car')
 
     active_response = client.get('/api/board/stream/status?token=dev-board-token')

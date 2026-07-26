@@ -109,6 +109,10 @@ def create_app(test_config=None):
             ensure_column('users', 'balance', 'INTEGER DEFAULT 0')
             ensure_column('sessions', 'billing_started_at', 'TEXT')
             ensure_column('sessions', 'allocated_seconds', "INTEGER DEFAULT 300")
+            ensure_column('devices', 'poll_url', 'TEXT')
+            ensure_column('devices', 'last_seen_at', 'TEXT')
+            ensure_column('devices', 'last_poll_ok', 'INTEGER DEFAULT 0')
+            ensure_column('devices', 'last_poll_error', 'TEXT')
             db.commit()
 
     def refresh_sessions():
@@ -258,6 +262,15 @@ def create_app(test_config=None):
             return None
         return datetime.strptime(raw_value, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
 
+    def format_timestamp(value):
+        if value is None:
+            return None
+        return value.strftime('%Y-%m-%d %H:%M:%S')
+
+    def resolve_board_name():
+        board_name = (request.args.get('board_name') or request.headers.get('X-Board-Name') or '').strip()
+        return board_name or None
+
     def is_stream_live(now=None):
         if now is None:
             now = datetime.now(timezone.utc)
@@ -270,63 +283,128 @@ def create_app(test_config=None):
         now = datetime.now(timezone.utc)
         app_state['last_stream_at'] = now
 
+    def is_device_online(device_row, now=None):
+        if now is None:
+            now = datetime.now(timezone.utc)
+        last_seen_at = parse_timestamp(device_row['last_seen_at'])
+        if last_seen_at is None:
+            return False
+        return (now - last_seen_at).total_seconds() <= app.config['BOARD_ACTIVE_STALE_SECONDS']
+
+    def sync_device_statuses(db=None, now=None):
+        if db is None:
+            db = get_db()
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        active_device_ids = {
+            row['device_id']
+            for row in db.execute("SELECT device_id FROM sessions WHERE status = 'active'").fetchall()
+        }
+        devices = db.execute('SELECT id, status, last_seen_at FROM devices ORDER BY id').fetchall()
+
+        changed = False
+        for device in devices:
+            if device['id'] in active_device_ids:
+                desired_status = 'in_use'
+            elif is_device_online(device, now):
+                desired_status = 'available'
+            else:
+                desired_status = 'offline'
+
+            if device['status'] != desired_status:
+                db.execute('UPDATE devices SET status = ? WHERE id = ?', (desired_status, device['id']))
+                changed = True
+
+        if changed:
+            db.commit()
+
     def mark_board_activity(source):
         now = datetime.now(timezone.utc)
         app_state['board_last_seen_at'] = now
         app_state['board_last_source'] = source
 
+    def mark_board_activity_for_device(source, board_name=None):
+        mark_board_activity(source)
+        db = get_db()
+        now = datetime.now(timezone.utc)
+        timestamp_raw = format_timestamp(now)
+
+        if board_name:
+            db.execute(
+                'UPDATE devices SET last_seen_at = ?, last_poll_ok = 1, last_poll_error = NULL WHERE name = ?',
+                (timestamp_raw, board_name),
+            )
+        else:
+            rows = db.execute('SELECT name FROM devices ORDER BY id').fetchall()
+            if len(rows) == 1:
+                db.execute(
+                    'UPDATE devices SET last_seen_at = ?, last_poll_ok = 1, last_poll_error = NULL WHERE name = ?',
+                    (timestamp_raw, rows[0]['name']),
+                )
+
+        db.commit()
+        sync_device_statuses(db, now)
+
     def is_board_active(now=None):
-        if now is None:
-            now = datetime.now(timezone.utc)
-
-        poll_url = app.config['BOARD_POLL_URL']
-        if poll_url:
-            last_poll_at = app_state['board_last_poll_at']
-            if last_poll_at is None:
-                return False
-            poll_ok = bool(app_state['board_poll_ok'])
-            is_recent = (now - last_poll_at).total_seconds() <= (app.config['BOARD_POLL_INTERVAL_SECONDS'] * 2.5)
-            return poll_ok and is_recent
-
-        last_seen_at = app_state['board_last_seen_at']
-        if last_seen_at is None:
-            # Backward compatible default when no direct board poll URL is configured.
-            return True
-        return (now - last_seen_at).total_seconds() <= app.config['BOARD_ACTIVE_STALE_SECONDS']
+        db = get_db()
+        row = db.execute("SELECT 1 FROM devices WHERE status IN ('available', 'in_use') LIMIT 1").fetchone()
+        return row is not None
 
     def poll_board_loop():
         poll_url = app.config['BOARD_POLL_URL']
         interval = app.config['BOARD_POLL_INTERVAL_SECONDS']
         timeout = app.config['BOARD_POLL_TIMEOUT_SECONDS']
 
-        if not poll_url:
-            return
-
         while True:
             now = datetime.now(timezone.utc)
             app_state['board_last_poll_at'] = now
             try:
-                req = urllib_request.Request(poll_url, headers={'User-Agent': 'RC-Car-Server-Poller/1.0'})
-                with urllib_request.urlopen(req, timeout=timeout) as response:
-                    status_code = int(getattr(response, 'status', 200) or 200)
-                    if status_code >= 400:
-                        raise urllib_error.HTTPError(poll_url, status_code, 'board poll failed', response.headers, None)
-                app_state['board_poll_ok'] = True
-                app_state['board_last_error'] = None
-                mark_board_activity('server_poll')
+                with app.app_context():
+                    db = get_db()
+                    devices = db.execute('SELECT id, poll_url FROM devices ORDER BY id').fetchall()
+                    any_ok = False
+                    last_error = None
+
+                    for device in devices:
+                        device_poll_url = (device['poll_url'] or '').strip() or poll_url
+                        if not device_poll_url:
+                            continue
+
+                        try:
+                            req = urllib_request.Request(device_poll_url, headers={'User-Agent': 'RC-Car-Server-Poller/1.0'})
+                            with urllib_request.urlopen(req, timeout=timeout) as response:
+                                status_code = int(getattr(response, 'status', 200) or 200)
+                                if status_code >= 400:
+                                    raise urllib_error.HTTPError(device_poll_url, status_code, 'board poll failed', response.headers, None)
+                            db.execute(
+                                'UPDATE devices SET last_seen_at = ?, last_poll_ok = 1, last_poll_error = NULL WHERE id = ?',
+                                (format_timestamp(now), device['id']),
+                            )
+                            any_ok = True
+                        except Exception as exc:
+                            last_error = str(exc)
+                            db.execute(
+                                'UPDATE devices SET last_poll_ok = 0, last_poll_error = ? WHERE id = ?',
+                                (last_error, device['id']),
+                            )
+
+                    db.commit()
+                    sync_device_statuses(db, now)
+                    app_state['board_poll_ok'] = any_ok
+                    app_state['board_last_error'] = last_error
             except Exception as exc:
                 app_state['board_poll_ok'] = False
                 app_state['board_last_error'] = str(exc)
             time.sleep(interval)
 
-    poll_url = app.config['BOARD_POLL_URL']
-    if poll_url:
-        threading.Thread(target=poll_board_loop, daemon=True).start()
+    threading.Thread(target=poll_board_loop, daemon=True).start()
 
     @app.before_request
     def ensure_session_state():
         if 'user_id' in session:
             refresh_sessions()
+            sync_device_statuses()
 
             timeout_seconds = app.config.get('SESSION_TIMEOUT_SECONDS', 1800)
             now = datetime.now(timezone.utc)
@@ -428,6 +506,8 @@ def create_app(test_config=None):
         if duration_seconds <= 0:
             return render_template('dashboard.html', user=user, error='Not enough credit', active_session=active_session, remaining_seconds=remaining_seconds)
 
+        sync_device_statuses(db)
+
         device = db.execute('SELECT id, name FROM devices WHERE status = ? ORDER BY id LIMIT 1', ('available',)).fetchone()
         if not device:
             return render_template('dashboard.html', user=user, error='No cars available right now', active_session=active_session, remaining_seconds=remaining_seconds)
@@ -437,7 +517,7 @@ def create_app(test_config=None):
             'INSERT INTO sessions (user_id, device_id, expires_at, billing_started_at, allocated_seconds) VALUES (?, ?, ?, ?, ?)',
             (user['id'], device['id'], expires_at, None, duration_seconds)
         )
-        db.execute('UPDATE devices SET status = ? WHERE id = ?', ('busy', device['id']))
+        db.execute('UPDATE devices SET status = ? WHERE id = ?', ('in_use', device['id']))
         db.execute('UPDATE users SET balance = balance - ? WHERE id = ?', (duration_seconds, user['id']))
         db.commit()
         user = get_user_view(session['user_id'])
@@ -463,10 +543,10 @@ def create_app(test_config=None):
         if active_session:
             refundable_seconds = get_remaining_seconds(session['user_id'], active_session)
             db.execute("UPDATE sessions SET status = 'released' WHERE id = ?", (active_session['id'],))
-            db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (active_session['device_id'],))
             if refundable_seconds > 0:
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refundable_seconds, session['user_id']))
             db.commit()
+            sync_device_statuses(db)
         return redirect(url_for('index'))
 
     @app.route('/api/session/status')
@@ -621,12 +701,21 @@ def create_app(test_config=None):
         name = payload.get('name')
         kind = payload.get('kind', 'arduino')
         location = payload.get('location', 'unknown')
+        poll_url = (payload.get('poll_url') or '').strip() or None
         if not name:
             return jsonify({'status': 'error', 'message': 'name is required'}), 400
 
         db = get_db()
-        db.execute('INSERT OR IGNORE INTO devices (name, kind, location, status) VALUES (?, ?, ?, ?)', (name, kind, location, 'available'))
+        db.execute(
+            'INSERT OR IGNORE INTO devices (name, kind, location, status, poll_url, last_seen_at, last_poll_ok, last_poll_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (name, kind, location, 'offline', poll_url, None, 0, None),
+        )
+        db.execute(
+            'UPDATE devices SET kind = ?, location = ?, poll_url = COALESCE(?, poll_url) WHERE name = ?',
+            (kind, location, poll_url, name),
+        )
         db.commit()
+        sync_device_statuses(db)
         device = db.execute('SELECT id, name, kind, location, status FROM devices WHERE name = ?', (name,)).fetchone()
         return jsonify({'status': 'registered', 'device': dict(device)})
 
@@ -646,7 +735,7 @@ def create_app(test_config=None):
         if token != app.config['BOARD_TOKEN']:
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
-        mark_board_activity('command_poll')
+        mark_board_activity_for_device('command_poll', resolve_board_name())
 
         try:
             action = pending_commands.get_nowait()
@@ -660,10 +749,25 @@ def create_app(test_config=None):
         if token != app.config['BOARD_TOKEN']:
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
-        mark_board_activity('stream_status_poll')
+        board_name = resolve_board_name()
+        mark_board_activity_for_device('stream_status_poll', board_name)
 
         db = get_db()
-        active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
+        sync_device_statuses(db)
+        if board_name:
+            active_row = db.execute(
+                """
+                SELECT s.id
+                FROM sessions s
+                JOIN devices d ON d.id = s.device_id
+                WHERE s.status = 'active' AND d.name = ?
+                ORDER BY s.id DESC
+                LIMIT 1
+                """,
+                (board_name,),
+            ).fetchone()
+        else:
+            active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
         return jsonify({'status': 'ok', 'enabled': active_row is not None, 'board_active': is_board_active()})
 
     @app.route('/api/board/status')
@@ -699,12 +803,15 @@ def create_app(test_config=None):
     @app.route('/api/video/pipeline/frame', methods=['POST'])
     def api_video_pipeline_frame():
         nonlocal latest_stream_chunk, pipeline_frame_counter
+        board_name = resolve_board_name()
         data = request.get_data()
         if not data:
             return jsonify({'status': 'error', 'message': 'frame data is required'}), 400
 
         ingest_started = time.monotonic()
         mark_stream_activity()
+        if board_name:
+            mark_board_activity_for_device('pipeline_frame', board_name)
         pipeline_frame_counter += 1
         latest_stream_chunk = data
         if stream_queue.full():
@@ -728,6 +835,8 @@ def create_app(test_config=None):
         nonlocal latest_stream_chunk, pipeline_frame_counter
         nonlocal h264_parse_errors
 
+        board_name = resolve_board_name()
+
         token = request.headers.get('X-Board-Token', '')
         if token != app.config['BOARD_TOKEN']:
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
@@ -741,6 +850,8 @@ def create_app(test_config=None):
 
         ingest_started = time.monotonic()
         mark_stream_activity()
+        if board_name:
+            mark_board_activity_for_device('h264_chunk', board_name)
 
         decoded_any = False
         packets = []
