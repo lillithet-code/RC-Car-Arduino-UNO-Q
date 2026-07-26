@@ -160,8 +160,9 @@ source "$DIR/.venv/bin/activate"
 set -a
 source "$DIR/.env"
 set +a
-python3 "$DIR/board_stream_sender.py" &
-python3 "$DIR/board_commands.py" &
+export PYTHONUNBUFFERED=1
+python3 -u "$DIR/board_stream_sender.py" &
+python3 -u "$DIR/board_commands.py" &
 wait
 EOF2
 
