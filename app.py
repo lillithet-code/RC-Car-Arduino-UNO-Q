@@ -33,7 +33,7 @@ def create_app(test_config=None):
     app = Flask(__name__)
     app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
     app.config['DATABASE_URL'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
-    app.config['STREAM_MAX_QUEUE'] = int(os.environ.get('STREAM_MAX_QUEUE', '8'))
+    app.config['STREAM_MAX_QUEUE'] = int(os.environ.get('STREAM_MAX_QUEUE', '1'))
     app.config['BOARD_TOKEN'] = os.environ.get('BOARD_TOKEN', 'dev-board-token')
     app.config['SESSION_DURATION_SECONDS'] = int(os.environ.get('SESSION_DURATION_SECONDS', '300'))
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '2.0'))
@@ -200,6 +200,14 @@ def create_app(test_config=None):
             raise RuntimeError('WebRTC backend not available')
         future = asyncio.run_coroutine_threadsafe(coro, webrtc_loop)
         return future.result(timeout=timeout)
+
+    def get_latest_stream_chunk():
+        chunk = stream_queue.get(timeout=0.25)
+        while True:
+            try:
+                chunk = stream_queue.get_nowait()
+            except Empty:
+                return chunk
 
     class StreamVideoTrack(VideoStreamTrack if WEBRTC_AVAILABLE else object):
         def __init__(self, frame_provider, fallback_width=640, fallback_height=480, fps=20):
@@ -709,7 +717,7 @@ def create_app(test_config=None):
         def generate_stream():
             while True:
                 try:
-                    chunk = stream_queue.get(timeout=0.25)
+                    chunk = get_latest_stream_chunk()
                 except Empty:
                     continue
                 yield (b'--frame\r\n'
@@ -727,7 +735,7 @@ def create_app(test_config=None):
         def generate_stream():
             while True:
                 try:
-                    chunk = stream_queue.get(timeout=0.25)
+                    chunk = get_latest_stream_chunk()
                 except Empty:
                     continue
                 yield (b'--frame\r\n'
