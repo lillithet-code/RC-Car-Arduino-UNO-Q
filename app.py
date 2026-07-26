@@ -418,6 +418,12 @@ def create_app(test_config=None):
             'device': active_session['name'],
         })
 
+    @app.route('/api/health')
+    def health_check():
+        db = get_db()
+        db.execute('SELECT 1')
+        return jsonify({'status': 'ok'})
+
     @app.route('/api/session/start', methods=['POST'])
     def session_start():
         if 'user_id' not in session:

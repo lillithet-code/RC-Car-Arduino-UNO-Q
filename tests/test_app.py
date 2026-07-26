@@ -340,6 +340,13 @@ def test_board_stream_status_reflects_active_sessions(client):
     assert active_payload['enabled'] is True
 
 
+def test_health_endpoint_is_public(client):
+    response = client.get('/api/health')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['status'] == 'ok'
+
+
 def test_board_commands_map_to_serial_bytes(monkeypatch):
     created = []
 
