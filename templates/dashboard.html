@@ -131,8 +131,18 @@
       }
     }
 
+    function isStreamSurfaceVisible() {
+      if (usingWebRTC) {
+        return Boolean(streamVideo && streamVideo.style.display !== 'none');
+      }
+      return Boolean(streamImage && streamImage.style.display !== 'none');
+    }
+
     async function maybeStartSessionBilling() {
-      if (!hasActiveSession || billingStarted || !streamLive || startRequestInFlight) {
+      if (!hasActiveSession || billingStarted || !streamReady || startRequestInFlight) {
+        return;
+      }
+      if (!isStreamSurfaceVisible()) {
         return;
       }
 
@@ -316,7 +326,7 @@
           streamImage.src = streamMjpegBaseUrl;
         }
 
-        if (!usingWebRTC && hasActiveSession && streamLive) {
+        if (!usingWebRTC && hasActiveSession && streamReady) {
           maybeStartSessionBilling();
         }
 

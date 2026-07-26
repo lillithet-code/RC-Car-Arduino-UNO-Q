@@ -17,7 +17,10 @@ from app import create_app
 def client():
     db_fd, db_path = tempfile.mkstemp()
     os.environ['DATABASE_URL'] = f'sqlite:///{db_path}'
-    app = create_app()
+    app = create_app({
+        'STREAM_READY_MIN_FRAMES': 1,
+        'STREAM_READY_WINDOW_SECONDS': 2.0,
+    })
     app.config['TESTING'] = True
     with app.test_client() as client:
         yield client
@@ -244,6 +247,42 @@ def test_stream_loss_refunds_and_allows_new_request(client):
     second_request = client.post('/request_car')
     assert second_request.status_code == 200
     assert b'Control session started' in second_request.data
+
+
+def test_session_start_requires_stream_ready(client):
+    client.post('/register', data={
+        'username': 'ruth',
+        'password': 'secret123',
+        'email': 'ruth@example.com'
+    })
+    client.post('/login', data={
+        'username': 'ruth',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-ruth',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-ruth')
+
+    request_response = client.post('/request_car')
+    assert request_response.status_code == 200
+
+    # Make readiness stricter than liveness for this test.
+    client.application.config['STREAM_READY_MIN_FRAMES'] = 5
+    client.application.config['STREAM_READY_WINDOW_SECONDS'] = 2.0
+
+    frame_response = client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
+    assert frame_response.status_code == 200
+
+    start_response = client.post('/api/session/start')
+    assert start_response.status_code == 409
+    payload = start_response.get_json()
+    assert payload['status'] == 'error'
+    assert payload['message'] == 'stream not ready'
 
 
 def test_release_still_works_when_stream_never_started(client):

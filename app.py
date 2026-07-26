@@ -789,8 +789,8 @@ def create_app(test_config=None):
         if not active_session:
             return jsonify({'status': 'error', 'message': 'no active session'}), 400
 
-        if not is_stream_live():
-            return jsonify({'status': 'error', 'message': 'stream not live'}), 409
+        if not is_stream_ready():
+            return jsonify({'status': 'error', 'message': 'stream not ready'}), 409
 
         if active_session['billing_started_at'] is None:
             now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
