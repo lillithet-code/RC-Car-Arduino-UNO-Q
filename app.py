@@ -138,7 +138,7 @@ def create_app(test_config=None):
                 changed = True
                 continue
 
-            if not is_stream_live(now):
+            if billing_started_at is not None and not is_stream_live(now):
                 db.execute("UPDATE sessions SET status = 'stream_lost' WHERE id = ?", (row['id'],))
                 db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (remaining_seconds, row['user_id']))
@@ -539,14 +539,28 @@ def create_app(test_config=None):
             return redirect(url_for('login'))
 
         db = get_db()
-        active_session = get_active_session(session['user_id'])
-        if active_session:
-            refundable_seconds = get_remaining_seconds(session['user_id'], active_session)
-            db.execute("UPDATE sessions SET status = 'released' WHERE id = ?", (active_session['id'],))
+        releasable_session = db.execute(
+            """
+            SELECT id, device_id, status, billing_started_at, allocated_seconds
+            FROM sessions
+            WHERE user_id = ? AND status IN ('active', 'stream_lost')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session['user_id'],),
+        ).fetchone()
+
+        if releasable_session:
+            refundable_seconds = 0
+            if releasable_session['status'] == 'active':
+                refundable_seconds = get_remaining_seconds(session['user_id'], releasable_session)
+
+            db.execute("UPDATE sessions SET status = 'released' WHERE id = ?", (releasable_session['id'],))
             if refundable_seconds > 0:
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refundable_seconds, session['user_id']))
             db.commit()
-            sync_device_statuses(db)
+
+        sync_device_statuses(db)
         return redirect(url_for('index'))
 
     @app.route('/api/session/status')

@@ -245,6 +245,40 @@ def test_stream_loss_refunds_and_allows_new_request(client):
     assert b'Control session started' in second_request.data
 
 
+def test_release_still_works_when_stream_never_started(client):
+    client.post('/register', data={
+        'username': 'nina',
+        'password': 'secret123',
+        'email': 'nina@example.com'
+    })
+    client.post('/login', data={
+        'username': 'nina',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-nina',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-nina')
+
+    first_request = client.post('/request_car')
+    assert first_request.status_code == 200
+    assert b'Control session started' in first_request.data
+
+    # Simulate stale stream before billing started; session should stay active until manual release.
+    client.application.config['STREAM_STALE_SECONDS'] = 0.0
+    dashboard_response = client.get('/')
+    assert dashboard_response.status_code == 200
+    assert b'Release RC Car' in dashboard_response.data
+
+    release_response = client.post('/release_car', follow_redirects=True)
+    assert release_response.status_code == 200
+    assert b'Request RC Car' in release_response.data
+
+
 def test_request_car_allows_partial_session_when_balance_under_default(client):
     client.post('/register', data={
         'username': 'helen',
