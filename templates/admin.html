@@ -22,12 +22,6 @@
     .checkbox-cell form { display:flex; justify-content:center; align-items:center; margin:0; }
     .checkbox-cell input[type="checkbox"] { margin:0; transform: scale(1.1); }
     a { color: #60a5fa; }
-    .status-row { display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap; }
-    .status-pill { display:inline-flex; align-items:center; gap:0.45rem; padding:0.4rem 0.65rem; border-radius:999px; font-weight:600; }
-    .status-pill.active { background:#14532d; color:#dcfce7; }
-    .status-pill.inactive { background:#7f1d1d; color:#fee2e2; }
-    .status-dot { width:10px; height:10px; border-radius:50%; background:currentColor; }
-    .status-meta { color:#cbd5e1; font-size:0.95rem; }
   </style>
 </head>
 <body>
@@ -35,21 +29,6 @@
     <div class="card">
       <h1>Administrator Dashboard</h1>
       <p>Manage accounts, time balances, and vehicle availability.</p>
-      <div class="status-row">
-        <span class="status-pill {% if board_active %}active{% else %}inactive{% endif %}">
-          <span class="status-dot"></span>
-          Car {% if board_active %}Active{% else %}Inactive{% endif %}
-        </span>
-        <span class="status-meta">
-          Last seen:
-          {% if board_last_seen_at %}
-            {{ board_last_seen_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
-          {% else %}
-            never
-          {% endif %}
-        </span>
-        <span class="status-meta">Source: {{ board_last_source or 'unknown' }}</span>
-      </div>
       <a href="{{ url_for('index') }}">Back to dashboard</a>
     </div>
 

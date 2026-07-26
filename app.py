@@ -613,15 +613,7 @@ def create_app(test_config=None):
 
         users = db.execute('SELECT id, username, balance, is_admin FROM users ORDER BY username').fetchall()
         devices = db.execute('SELECT id, name, status, location FROM devices ORDER BY id').fetchall()
-        return render_template(
-            'admin.html',
-            users=users,
-            devices=devices,
-            format_seconds=format_seconds,
-            board_active=is_board_active(),
-            board_last_seen_at=app_state['board_last_seen_at'],
-            board_last_source=app_state['board_last_source'],
-        )
+        return render_template('admin.html', users=users, devices=devices, format_seconds=format_seconds)
 
     @app.route('/api/devices/register', methods=['POST'])
     def register_device():
