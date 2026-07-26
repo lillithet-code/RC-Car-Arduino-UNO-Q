@@ -310,6 +310,36 @@ def test_board_commands_are_exposed_for_the_board_client(client):
     assert payload['action'] == 'forward'
 
 
+def test_board_stream_status_reflects_active_sessions(client):
+    inactive_response = client.get('/api/board/stream/status?token=dev-board-token')
+    assert inactive_response.status_code == 200
+    inactive_payload = inactive_response.get_json()
+    assert inactive_payload['status'] == 'ok'
+    assert inactive_payload['enabled'] is False
+
+    client.post('/register', data={
+        'username': 'ivy',
+        'password': 'secret123',
+        'email': 'ivy@example.com'
+    })
+    client.post('/login', data={
+        'username': 'ivy',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-ivy',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    client.post('/request_car')
+
+    active_response = client.get('/api/board/stream/status?token=dev-board-token')
+    assert active_response.status_code == 200
+    active_payload = active_response.get_json()
+    assert active_payload['status'] == 'ok'
+    assert active_payload['enabled'] is True
+
+
 def test_board_commands_map_to_serial_bytes(monkeypatch):
     created = []
 

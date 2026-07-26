@@ -566,6 +566,16 @@ def create_app(test_config=None):
             return jsonify({'status': 'ok', 'action': None})
         return jsonify({'status': 'ok', 'action': action})
 
+    @app.route('/api/board/stream/status')
+    def board_stream_status():
+        token = request.args.get('token')
+        if token != app.config['BOARD_TOKEN']:
+            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
+
+        db = get_db()
+        active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
+        return jsonify({'status': 'ok', 'enabled': active_row is not None})
+
     @app.route('/api/stream/chunk', methods=['POST'])
     def api_stream_chunk():
         nonlocal latest_stream_chunk

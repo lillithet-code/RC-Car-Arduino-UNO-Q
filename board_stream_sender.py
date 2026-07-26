@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
 import time
@@ -9,6 +10,7 @@ import cv2
 
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
 STREAM_ENDPOINT = f'{SERVER_BASE_URL}/api/video/pipeline/frame'
+STREAM_STATUS_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/status'
 BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
 VIDEO_DEVICE = int(os.environ.get('VIDEO_DEVICE', '0'))
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '25'))
@@ -19,6 +21,7 @@ VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1280'))
 VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
 CAMERA_FOURCC = os.environ.get('CAMERA_FOURCC', 'MJPG').strip().upper()
 CAPTURE_BUFFER_SIZE = int(os.environ.get('CAPTURE_BUFFER_SIZE', '1'))
+STREAM_IDLE_POLL_SECONDS = float(os.environ.get('STREAM_IDLE_POLL_SECONDS', '2.0'))
 
 
 def open_capture(device_index):
@@ -50,15 +53,47 @@ def open_capture(device_index):
     return cap
 
 
-def main():
-    cap = open_capture(VIDEO_DEVICE)
-    if not cap.isOpened():
-        print('Unable to open camera device', file=sys.stderr)
-        sys.exit(1)
+def fetch_stream_enabled():
+    url = f'{STREAM_STATUS_ENDPOINT}?token={BOARD_TOKEN}'
+    req = urllib_request.Request(url, headers={'User-Agent': 'RC-Car-Board-Stream/1.0'})
+    try:
+        with urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0)) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        return bool(payload.get('enabled', False))
+    except Exception as exc:
+        print(f'stream status check failed: {exc}', file=sys.stderr)
+        return False
 
+
+def main():
+    cap = None
     frame_period = 1.0 / max(FRAME_RATE, 1)
+    last_enabled = None
 
     while True:
+        stream_enabled = fetch_stream_enabled()
+
+        if stream_enabled != last_enabled:
+            state_text = 'enabled' if stream_enabled else 'disabled'
+            print(f'stream state changed: {state_text}')
+            last_enabled = stream_enabled
+
+        if not stream_enabled:
+            if cap is not None:
+                cap.release()
+                cap = None
+                print('camera released while idle')
+            time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
+            continue
+
+        if cap is None:
+            cap = open_capture(VIDEO_DEVICE)
+            if not cap.isOpened():
+                print('Unable to open camera device', file=sys.stderr)
+                cap = None
+                time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
+                continue
+
         frame_started = time.monotonic()
         ok, frame = cap.read()
         if not ok:
