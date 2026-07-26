@@ -316,6 +316,7 @@ def test_board_stream_status_reflects_active_sessions(client):
     inactive_payload = inactive_response.get_json()
     assert inactive_payload['status'] == 'ok'
     assert inactive_payload['enabled'] is False
+    assert 'board_active' in inactive_payload
 
     client.post('/register', data={
         'username': 'ivy',
@@ -338,6 +339,17 @@ def test_board_stream_status_reflects_active_sessions(client):
     active_payload = active_response.get_json()
     assert active_payload['status'] == 'ok'
     assert active_payload['enabled'] is True
+    assert 'board_active' in active_payload
+
+
+def test_board_status_endpoint_reports_liveness(client):
+    response = client.get('/api/board/status')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['status'] == 'ok'
+    assert 'board_active' in payload
+    assert 'last_seen_at' in payload
+    assert 'last_source' in payload
 
 
 def test_health_endpoint_is_public(client):

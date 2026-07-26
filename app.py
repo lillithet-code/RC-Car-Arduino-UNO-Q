@@ -5,6 +5,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Queue
 from sqlite3 import dbapi2 as sqlite3
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from flask import Flask, g, redirect, render_template, request, session, url_for, jsonify, Response
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -39,6 +41,10 @@ def create_app(test_config=None):
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '2.0'))
     app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
     app.config['STREAM_PROFILE'] = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+    app.config['BOARD_POLL_URL'] = os.environ.get('BOARD_POLL_URL', '').strip()
+    app.config['BOARD_POLL_INTERVAL_SECONDS'] = max(1.0, float(os.environ.get('BOARD_POLL_INTERVAL_SECONDS', '2.0')))
+    app.config['BOARD_POLL_TIMEOUT_SECONDS'] = max(0.2, float(os.environ.get('BOARD_POLL_TIMEOUT_SECONDS', '1.5')))
+    app.config['BOARD_ACTIVE_STALE_SECONDS'] = max(2.0, float(os.environ.get('BOARD_ACTIVE_STALE_SECONDS', '8.0')))
 
     if test_config:
         app.config.update(test_config)
@@ -180,7 +186,14 @@ def create_app(test_config=None):
     latest_stream_chunk = None
     pending_commands = Queue()
     pipeline_frame_counter = 0
-    app_state = {'last_stream_at': None}
+    app_state = {
+        'last_stream_at': None,
+        'board_last_seen_at': None,
+        'board_last_source': None,
+        'board_last_poll_at': None,
+        'board_poll_ok': None,
+        'board_last_error': None,
+    }
     peer_connections = set()
     h264_decoder = CodecContext.create('h264', 'r') if CodecContext is not None else None
     h264_parse_errors = 0
@@ -256,6 +269,59 @@ def create_app(test_config=None):
     def mark_stream_activity():
         now = datetime.now(timezone.utc)
         app_state['last_stream_at'] = now
+
+    def mark_board_activity(source):
+        now = datetime.now(timezone.utc)
+        app_state['board_last_seen_at'] = now
+        app_state['board_last_source'] = source
+
+    def is_board_active(now=None):
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        poll_url = app.config['BOARD_POLL_URL']
+        if poll_url:
+            last_poll_at = app_state['board_last_poll_at']
+            if last_poll_at is None:
+                return False
+            poll_ok = bool(app_state['board_poll_ok'])
+            is_recent = (now - last_poll_at).total_seconds() <= (app.config['BOARD_POLL_INTERVAL_SECONDS'] * 2.5)
+            return poll_ok and is_recent
+
+        last_seen_at = app_state['board_last_seen_at']
+        if last_seen_at is None:
+            # Backward compatible default when no direct board poll URL is configured.
+            return True
+        return (now - last_seen_at).total_seconds() <= app.config['BOARD_ACTIVE_STALE_SECONDS']
+
+    def poll_board_loop():
+        poll_url = app.config['BOARD_POLL_URL']
+        interval = app.config['BOARD_POLL_INTERVAL_SECONDS']
+        timeout = app.config['BOARD_POLL_TIMEOUT_SECONDS']
+
+        if not poll_url:
+            return
+
+        while True:
+            now = datetime.now(timezone.utc)
+            app_state['board_last_poll_at'] = now
+            try:
+                req = urllib_request.Request(poll_url, headers={'User-Agent': 'RC-Car-Server-Poller/1.0'})
+                with urllib_request.urlopen(req, timeout=timeout) as response:
+                    status_code = int(getattr(response, 'status', 200) or 200)
+                    if status_code >= 400:
+                        raise urllib_error.HTTPError(poll_url, status_code, 'board poll failed', response.headers, None)
+                app_state['board_poll_ok'] = True
+                app_state['board_last_error'] = None
+                mark_board_activity('server_poll')
+            except Exception as exc:
+                app_state['board_poll_ok'] = False
+                app_state['board_last_error'] = str(exc)
+            time.sleep(interval)
+
+    poll_url = app.config['BOARD_POLL_URL']
+    if poll_url:
+        threading.Thread(target=poll_board_loop, daemon=True).start()
 
     @app.before_request
     def ensure_session_state():
@@ -580,6 +646,8 @@ def create_app(test_config=None):
         if token != app.config['BOARD_TOKEN']:
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
+        mark_board_activity('command_poll')
+
         try:
             action = pending_commands.get_nowait()
         except Empty:
@@ -592,9 +660,24 @@ def create_app(test_config=None):
         if token != app.config['BOARD_TOKEN']:
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
+        mark_board_activity('stream_status_poll')
+
         db = get_db()
         active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
-        return jsonify({'status': 'ok', 'enabled': active_row is not None})
+        return jsonify({'status': 'ok', 'enabled': active_row is not None, 'board_active': is_board_active()})
+
+    @app.route('/api/board/status')
+    def board_status():
+        status = {
+            'status': 'ok',
+            'board_active': is_board_active(),
+            'last_seen_at': app_state['board_last_seen_at'].isoformat() if app_state['board_last_seen_at'] else None,
+            'last_source': app_state['board_last_source'],
+            'last_poll_at': app_state['board_last_poll_at'].isoformat() if app_state['board_last_poll_at'] else None,
+            'poll_ok': app_state['board_poll_ok'],
+            'last_error': app_state['board_last_error'],
+        }
+        return jsonify(status)
 
     @app.route('/api/stream/chunk', methods=['POST'])
     def api_stream_chunk():
