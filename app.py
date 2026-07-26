@@ -166,7 +166,7 @@ def create_app(test_config=None):
             active_session = get_active_session(session['user_id'])
             remaining_seconds = get_remaining_seconds(session['user_id'], active_session)
             return render_template('dashboard.html', user=user, active_session=active_session, remaining_seconds=remaining_seconds)
-        return render_template('landing.html')
+        return redirect(url_for('login'))
 
     @app.route('/register', methods=['GET', 'POST'])
     def register():
