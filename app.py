@@ -3,7 +3,7 @@ import asyncio
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from sqlite3 import dbapi2 as sqlite3
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -42,6 +42,8 @@ def create_app(test_config=None):
     app.config['STREAM_LOSS_GRACE_SECONDS'] = float(os.environ.get('STREAM_LOSS_GRACE_SECONDS', '30.0'))
     app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
     app.config['STREAM_CROP_BOTTOM_PX'] = max(0, int(os.environ.get('STREAM_CROP_BOTTOM_PX', '2')))
+    app.config['STREAM_JPEG_QUALITY'] = max(30, min(95, int(os.environ.get('STREAM_JPEG_QUALITY', '65'))))
+    app.config['H264_INGEST_QUEUE_MAX'] = max(1, int(os.environ.get('H264_INGEST_QUEUE_MAX', '8')))
     app.config['STREAM_PROFILE'] = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
     app.config['BOARD_POLL_URL'] = os.environ.get('BOARD_POLL_URL', '').strip()
     app.config['BOARD_POLL_INTERVAL_SECONDS'] = max(1.0, float(os.environ.get('BOARD_POLL_INTERVAL_SECONDS', '2.0')))
@@ -214,6 +216,7 @@ def create_app(test_config=None):
     h264_decoder = CodecContext.create('h264', 'r') if CodecContext is not None else None
     h264_parse_errors = 0
     h264_headers_seen = False
+    h264_ingest_queue = Queue(maxsize=app.config['H264_INGEST_QUEUE_MAX'])
 
     webrtc_loop = None
     if WEBRTC_AVAILABLE:
@@ -326,6 +329,112 @@ def create_app(test_config=None):
                 return True
 
         return False
+
+    def decode_h264_chunk(data):
+        nonlocal latest_stream_chunk, pipeline_frame_counter
+        nonlocal h264_parse_errors, h264_decoder, h264_headers_seen
+
+        has_parameter_sets = h264_chunk_has_parameter_sets(data)
+        if has_parameter_sets:
+            # Fresh SPS/PPS boundary: reset decoder state to avoid stale refs.
+            h264_headers_seen = True
+            if CodecContext is not None:
+                try:
+                    h264_decoder = CodecContext.create('h264', 'r')
+                except Exception:
+                    pass
+
+        if not h264_headers_seen:
+            # Skip decode until a self-describing chunk arrives.
+            return False, 0
+
+        decoded_any = False
+        decoded_frames = 0
+        latest_decoded_frame = None
+        packets = []
+        try:
+            parsed_packets = h264_decoder.parse(data)
+            if parsed_packets:
+                packets.extend(parsed_packets)
+        except Exception:
+            # Parsing can fail on partial chunk boundaries; keep ingesting future chunks.
+            h264_parse_errors += 1
+            if h264_parse_errors <= 3 or h264_parse_errors % 100 == 0:
+                app.logger.warning('h264 parse failed on chunk; waiting for more data')
+
+        if not packets:
+            try:
+                packets = [Packet(data)]
+            except Exception:
+                packets = []
+
+        for packet in packets:
+            try:
+                frames = h264_decoder.decode(packet)
+            except Exception:
+                continue
+            for frame in frames:
+                decoded_frames += 1
+                latest_decoded_frame = frame
+
+        if latest_decoded_frame is not None:
+            frame_bgr = latest_decoded_frame.to_ndarray(format='bgr24')
+            crop_bottom = int(app.config.get('STREAM_CROP_BOTTOM_PX', 0) or 0)
+            if crop_bottom > 0 and frame_bgr.shape[0] > crop_bottom:
+                frame_bgr = frame_bgr[:-crop_bottom, :]
+            ok, encoded = cv2.imencode(
+                '.jpg',
+                frame_bgr,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(app.config['STREAM_JPEG_QUALITY'])],
+            )
+            if ok:
+                latest_stream_chunk = encoded.tobytes()
+                if stream_queue.full():
+                    try:
+                        stream_queue.get_nowait()
+                    except Empty:
+                        pass
+                stream_queue.put(latest_stream_chunk)
+                pipeline_frame_counter += 1
+                decoded_any = True
+
+        return decoded_any, decoded_frames
+
+    def h264_decode_worker():
+        while True:
+            data = h264_ingest_queue.get()
+            if data is None:
+                return
+
+            ingest_started = time.monotonic()
+            decoded_any, decoded_frames = decode_h264_chunk(data)
+            ingest_ms = (time.monotonic() - ingest_started) * 1000.0
+
+            if ingest_ms >= 120.0:
+                app.logger.warning(
+                    'h264 ingest slow decoded=%s decoded_frames=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
+                    decoded_any,
+                    decoded_frames,
+                    len(data),
+                    stream_queue.qsize(),
+                    ingest_ms,
+                    h264_parse_errors,
+                )
+
+            if app.config['STREAM_PROFILE'] and (pipeline_frame_counter <= 3 or pipeline_frame_counter % 30 == 0):
+                app.logger.info(
+                    'stream profile ingest=h264 decoded=%s decoded_frames=%s frame_id=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
+                    decoded_any,
+                    decoded_frames,
+                    pipeline_frame_counter,
+                    len(data),
+                    stream_queue.qsize(),
+                    ingest_ms,
+                    h264_parse_errors,
+                )
+
+    if h264_decoder is not None and cv2 is not None:
+        threading.Thread(target=h264_decode_worker, daemon=True).start()
 
     def is_device_online(device_row, now=None):
         if now is None:
@@ -890,9 +999,6 @@ def create_app(test_config=None):
 
     @app.route('/api/video/h264/chunk', methods=['POST'])
     def api_video_h264_chunk():
-        nonlocal latest_stream_chunk, pipeline_frame_counter
-        nonlocal h264_parse_errors, h264_decoder, h264_headers_seen
-
         board_name = resolve_board_name()
 
         token = request.headers.get('X-Board-Token', '')
@@ -906,96 +1012,35 @@ def create_app(test_config=None):
         if h264_decoder is None or cv2 is None:
             return jsonify({'status': 'error', 'message': 'h264 decode not available'}), 503
 
-        ingest_started = time.monotonic()
+        enqueue_started = time.monotonic()
         mark_stream_activity()
         if board_name:
             mark_board_activity_for_device('h264_chunk', board_name)
-
-        has_parameter_sets = h264_chunk_has_parameter_sets(data)
-        if has_parameter_sets:
-            # Fresh SPS/PPS boundary: reset decoder state to avoid stale refs.
-            h264_headers_seen = True
-            if CodecContext is not None:
-                try:
-                    h264_decoder = CodecContext.create('h264', 'r')
-                except Exception:
-                    pass
-
-        if not h264_headers_seen:
-            # Keep liveness but skip decode until a self-describing chunk arrives.
-            return jsonify({'status': 'ok', 'decoded': False, 'frame_id': pipeline_frame_counter})
-
-        decoded_any = False
-        decoded_frames = 0
-        latest_decoded_frame = None
-        packets = []
+        dropped_oldest = False
         try:
-            parsed_packets = h264_decoder.parse(data)
-            if parsed_packets:
-                packets.extend(parsed_packets)
-        except Exception:
-            # Parsing can fail on partial chunk boundaries; keep ingesting future chunks.
-            h264_parse_errors += 1
-            if h264_parse_errors <= 3 or h264_parse_errors % 100 == 0:
-                app.logger.warning('h264 parse failed on chunk; waiting for more data')
-
-        if not packets:
+            h264_ingest_queue.put_nowait(data)
+        except Full:
             try:
-                packets = [Packet(data)]
-            except Exception:
-                packets = []
-
-        for packet in packets:
+                h264_ingest_queue.get_nowait()
+                dropped_oldest = True
+            except Empty:
+                pass
             try:
-                frames = h264_decoder.decode(packet)
-            except Exception:
-                continue
-            for frame in frames:
-                decoded_frames += 1
-                latest_decoded_frame = frame
+                h264_ingest_queue.put_nowait(data)
+            except Full:
+                pass
 
-        if latest_decoded_frame is not None:
-            frame_bgr = latest_decoded_frame.to_ndarray(format='bgr24')
-            crop_bottom = int(app.config.get('STREAM_CROP_BOTTOM_PX', 0) or 0)
-            if crop_bottom > 0 and frame_bgr.shape[0] > crop_bottom:
-                frame_bgr = frame_bgr[:-crop_bottom, :]
-            ok, encoded = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-            if ok:
-                latest_stream_chunk = encoded.tobytes()
-                if stream_queue.full():
-                    try:
-                        stream_queue.get_nowait()
-                    except Empty:
-                        pass
-                stream_queue.put(latest_stream_chunk)
-                pipeline_frame_counter += 1
-                decoded_any = True
-
-        ingest_ms = (time.monotonic() - ingest_started) * 1000.0
-        if ingest_ms >= 120.0:
-            app.logger.warning(
-                'h264 ingest slow decoded=%s decoded_frames=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
-                decoded_any,
-                decoded_frames,
-                len(data),
-                stream_queue.qsize(),
-                ingest_ms,
-                h264_parse_errors,
-            )
-
-        if app.config['STREAM_PROFILE'] and (pipeline_frame_counter <= 3 or pipeline_frame_counter % 30 == 0):
+        enqueue_ms = (time.monotonic() - enqueue_started) * 1000.0
+        if app.config['STREAM_PROFILE'] and enqueue_ms >= 20.0:
             app.logger.info(
-                'stream profile ingest=h264 decoded=%s decoded_frames=%s frame_id=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
-                decoded_any,
-                decoded_frames,
-                pipeline_frame_counter,
+                'stream profile ingest=h264 enqueue_ms=%.1f bytes=%s backlog=%s dropped_oldest=%s',
+                enqueue_ms,
                 len(data),
-                stream_queue.qsize(),
-                ingest_ms,
-                h264_parse_errors,
+                h264_ingest_queue.qsize(),
+                dropped_oldest,
             )
 
-        return jsonify({'status': 'ok', 'decoded': decoded_any, 'frame_id': pipeline_frame_counter})
+        return jsonify({'status': 'ok', 'queued': h264_ingest_queue.qsize(), 'dropped_oldest': dropped_oldest})
 
     @app.route('/video_feed')
     def video_feed():
