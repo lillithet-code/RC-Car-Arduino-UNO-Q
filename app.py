@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Queue
 from sqlite3 import dbapi2 as sqlite3
@@ -37,6 +38,7 @@ def create_app(test_config=None):
     app.config['SESSION_DURATION_SECONDS'] = int(os.environ.get('SESSION_DURATION_SECONDS', '300'))
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '2.0'))
     app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
+    app.config['STREAM_PROFILE'] = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 
     if test_config:
         app.config.update(test_config)
@@ -610,6 +612,7 @@ def create_app(test_config=None):
         if not data:
             return jsonify({'status': 'error', 'message': 'frame data is required'}), 400
 
+        ingest_started = time.monotonic()
         mark_stream_activity()
         pipeline_frame_counter += 1
         latest_stream_chunk = data
@@ -619,6 +622,14 @@ def create_app(test_config=None):
             except Empty:
                 pass
         stream_queue.put(data)
+        if app.config['STREAM_PROFILE'] and (pipeline_frame_counter <= 3 or pipeline_frame_counter % 30 == 0):
+            app.logger.info(
+                'stream profile ingest=frame frame_id=%s bytes=%s queue=%s ingest_ms=%.1f',
+                pipeline_frame_counter,
+                len(data),
+                stream_queue.qsize(),
+                (time.monotonic() - ingest_started) * 1000.0,
+            )
         return jsonify({'status': 'ok', 'received': len(data), 'frame_id': pipeline_frame_counter})
 
     @app.route('/api/video/h264/chunk', methods=['POST'])
@@ -637,6 +648,7 @@ def create_app(test_config=None):
         if h264_decoder is None or cv2 is None:
             return jsonify({'status': 'error', 'message': 'h264 decode not available'}), 503
 
+        ingest_started = time.monotonic()
         mark_stream_activity()
 
         decoded_any = False
@@ -676,6 +688,17 @@ def create_app(test_config=None):
                 stream_queue.put(latest_stream_chunk)
                 pipeline_frame_counter += 1
                 decoded_any = True
+
+        if app.config['STREAM_PROFILE'] and (pipeline_frame_counter <= 3 or pipeline_frame_counter % 30 == 0):
+            app.logger.info(
+                'stream profile ingest=h264 decoded=%s frame_id=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
+                decoded_any,
+                pipeline_frame_counter,
+                len(data),
+                stream_queue.qsize(),
+                (time.monotonic() - ingest_started) * 1000.0,
+                h264_parse_errors,
+            )
 
         return jsonify({'status': 'ok', 'decoded': decoded_any, 'frame_id': pipeline_frame_counter})
 

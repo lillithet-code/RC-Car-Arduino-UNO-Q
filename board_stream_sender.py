@@ -37,6 +37,8 @@ H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
 H264_ENCODERS = os.environ.get('H264_ENCODERS', 'h264_v4l2m2m,h264_omx').strip()
 H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536'))
 H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
+STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
 
 
 def get_h264_encoders():
@@ -114,6 +116,25 @@ def post_bytes(url, payload, content_type):
     urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
 
 
+def log_profile_summary(*, path, event_count, total_elapsed, read_elapsed=None, post_elapsed=None, encode_elapsed=None, upload_bytes=None, extra=None):
+    if not STREAM_PROFILE or event_count <= 0:
+        return
+
+    rate = event_count / max(total_elapsed, 1e-6)
+    parts = [f'stream profile path={path}', f'events={event_count}', f'rate={rate:.2f}', f'total_ms={total_elapsed * 1000:.1f}']
+    if read_elapsed is not None:
+        parts.append(f'read_ms={read_elapsed * 1000:.1f}')
+    if encode_elapsed is not None:
+        parts.append(f'encode_ms={encode_elapsed * 1000:.1f}')
+    if post_elapsed is not None:
+        parts.append(f'post_ms={post_elapsed * 1000:.1f}')
+    if upload_bytes is not None:
+        parts.append(f'bytes={upload_bytes}')
+    if extra:
+        parts.append(extra)
+    print(' '.join(parts))
+
+
 def start_h264_ffmpeg(input_format, encoder_name):
     encoder_mode = H264_ENCODER_MODE
     if encoder_mode not in {'auto', 'copy', 'transcode'}:
@@ -171,6 +192,12 @@ def main():
     cap = None
     h264_process = None
     frame_period = 1.0 / max(FRAME_RATE, 1)
+    profile_event_count = 0
+    profile_window_started = time.monotonic()
+    profile_read_elapsed = 0.0
+    profile_post_elapsed = 0.0
+    profile_encode_elapsed = 0.0
+    profile_upload_bytes = 0
     last_enabled = None
     h264_input_formats = get_h264_input_formats()
     h264_input_index = 0
@@ -188,6 +215,8 @@ def main():
         f'h264_encoder_mode={H264_ENCODER_MODE} '
         f'h264_encoders={"|".join(h264_encoders)}'
     )
+    if STREAM_PROFILE:
+        print(f'stream profiling enabled every={STREAM_PROFILE_EVERY}')
     h264_failures = 0
     h264_upload_buffer = bytearray()
     h264_last_upload = time.monotonic()
@@ -279,16 +308,39 @@ def main():
             ready, _, _ = select.select([h264_process.stdout], [], [], 0.5)
             if not ready:
                 if h264_upload_buffer and (time.monotonic() - h264_last_upload) >= h264_max_delay:
+                    flush_started = time.monotonic()
+                    flush_size = len(h264_upload_buffer)
                     try:
                         post_bytes(STREAM_H264_ENDPOINT, bytes(h264_upload_buffer), 'video/h264')
                         h264_upload_buffer.clear()
                         h264_last_upload = time.monotonic()
                         h264_failures = 0
+                        if STREAM_PROFILE:
+                            profile_post_elapsed += time.monotonic() - flush_started
+                            profile_upload_bytes += flush_size
+                            profile_event_count += 1
                     except Exception as exc:
                         print(f'H264 upload failed: {exc}', file=sys.stderr)
+                    if STREAM_PROFILE and profile_event_count % STREAM_PROFILE_EVERY == 0:
+                        profile_total_elapsed = time.monotonic() - profile_window_started
+                        log_profile_summary(
+                            path='h264_hw',
+                            event_count=profile_event_count,
+                            total_elapsed=profile_total_elapsed,
+                            read_elapsed=profile_read_elapsed,
+                            post_elapsed=profile_post_elapsed,
+                            upload_bytes=profile_upload_bytes,
+                        )
+                        profile_event_count = 0
+                        profile_window_started = time.monotonic()
+                        profile_read_elapsed = 0.0
+                        profile_post_elapsed = 0.0
+                        profile_upload_bytes = 0
                 continue
 
+            read_started = time.monotonic()
             chunk = h264_process.stdout.read(max(1024, H264_CHUNK_BYTES))
+            profile_read_elapsed += time.monotonic() - read_started
             if not chunk:
                 time.sleep(0.05)
                 continue
@@ -302,13 +354,35 @@ def main():
             if not should_flush:
                 continue
 
+            post_started = time.monotonic()
             try:
+                flush_size = len(h264_upload_buffer)
                 post_bytes(STREAM_H264_ENDPOINT, bytes(h264_upload_buffer), 'video/h264')
                 h264_upload_buffer.clear()
                 h264_last_upload = time.monotonic()
                 h264_failures = 0
+                if STREAM_PROFILE:
+                    profile_post_elapsed += time.monotonic() - post_started
+                    profile_upload_bytes += flush_size
+                    profile_event_count += 1
             except Exception as exc:
                 print(f'H264 upload failed: {exc}', file=sys.stderr)
+
+            if STREAM_PROFILE and profile_event_count % STREAM_PROFILE_EVERY == 0:
+                profile_total_elapsed = time.monotonic() - profile_window_started
+                log_profile_summary(
+                    path='h264_hw',
+                    event_count=profile_event_count,
+                    total_elapsed=profile_total_elapsed,
+                    read_elapsed=profile_read_elapsed,
+                    post_elapsed=profile_post_elapsed,
+                    upload_bytes=profile_upload_bytes,
+                )
+                profile_event_count = 0
+                profile_window_started = time.monotonic()
+                profile_read_elapsed = 0.0
+                profile_post_elapsed = 0.0
+                profile_upload_bytes = 0
             continue
 
         if cap is None:
@@ -325,12 +399,39 @@ def main():
             time.sleep(0.01)
             continue
 
+        encode_started = time.monotonic()
         _, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), QUALITY])
+        encode_elapsed = time.monotonic() - encode_started
         payload = encoded.tobytes()
+        post_started = time.monotonic()
         try:
             post_bytes(STREAM_ENDPOINT, payload, 'image/jpeg')
         except Exception as exc:
             print(f'Upload failed: {exc}', file=sys.stderr)
+
+        if STREAM_PROFILE:
+            profile_event_count += 1
+            profile_read_elapsed += encode_started - frame_started
+            profile_encode_elapsed += encode_elapsed
+            profile_post_elapsed += time.monotonic() - post_started
+            profile_upload_bytes += len(payload)
+            if profile_event_count % STREAM_PROFILE_EVERY == 0:
+                profile_total_elapsed = time.monotonic() - profile_window_started
+                log_profile_summary(
+                    path='mjpg',
+                    event_count=profile_event_count,
+                    total_elapsed=profile_total_elapsed,
+                    read_elapsed=profile_read_elapsed,
+                    post_elapsed=profile_post_elapsed,
+                    encode_elapsed=profile_encode_elapsed,
+                    upload_bytes=profile_upload_bytes,
+                )
+                profile_event_count = 0
+                profile_window_started = time.monotonic()
+                profile_read_elapsed = 0.0
+                profile_post_elapsed = 0.0
+                profile_encode_elapsed = 0.0
+                profile_upload_bytes = 0
 
         elapsed = time.monotonic() - frame_started
         remaining = frame_period - elapsed
