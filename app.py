@@ -39,6 +39,7 @@ def create_app(test_config=None):
     app.config['BOARD_TOKEN'] = os.environ.get('BOARD_TOKEN', 'dev-board-token')
     app.config['SESSION_DURATION_SECONDS'] = int(os.environ.get('SESSION_DURATION_SECONDS', '300'))
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '6.0'))
+    app.config['STREAM_LOSS_GRACE_SECONDS'] = float(os.environ.get('STREAM_LOSS_GRACE_SECONDS', '30.0'))
     app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
     app.config['STREAM_PROFILE'] = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
     app.config['BOARD_POLL_URL'] = os.environ.get('BOARD_POLL_URL', '').strip()
@@ -140,7 +141,15 @@ def create_app(test_config=None):
                 continue
 
             # Only enforce stream-loss after at least one stream frame has been observed.
-            if billing_started_at is not None and last_stream_at is not None and not is_stream_live(now):
+            if billing_started_at is not None and last_stream_at is not None:
+                stream_gap_seconds = (now - last_stream_at).total_seconds()
+            else:
+                stream_gap_seconds = None
+
+            if (
+                stream_gap_seconds is not None
+                and stream_gap_seconds > app.config['STREAM_LOSS_GRACE_SECONDS']
+            ):
                 db.execute("UPDATE sessions SET status = 'stream_lost' WHERE id = ?", (row['id'],))
                 db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (remaining_seconds, row['user_id']))

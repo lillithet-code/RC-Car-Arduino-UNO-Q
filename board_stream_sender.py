@@ -37,6 +37,7 @@ VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
 CAMERA_FOURCC = os.environ.get('CAMERA_FOURCC', 'MJPG').strip().upper()
 CAPTURE_BUFFER_SIZE = int(os.environ.get('CAPTURE_BUFFER_SIZE', '1'))
 STREAM_IDLE_POLL_SECONDS = float(os.environ.get('STREAM_IDLE_POLL_SECONDS', '2.0'))
+STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
 STREAM_PIPELINE = os.environ.get('STREAM_PIPELINE', 'auto').strip().lower()
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
 H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
@@ -491,6 +492,7 @@ def main():
     h264_min_flush_bytes = max(1024, min(h264_batch_bytes, H264_UPLOAD_MIN_FLUSH_BYTES))
     h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
     next_video_probe_at = 0.0
+    stream_disabled_since = None
     poll_count = 0
 
     while True:
@@ -501,8 +503,18 @@ def main():
             state_text = 'enabled' if stream_enabled else 'disabled'
             print(f'stream state changed: {state_text}')
             last_enabled = stream_enabled
+            if stream_enabled:
+                stream_disabled_since = None
 
         if not stream_enabled:
+            now_monotonic = time.monotonic()
+            if stream_disabled_since is None:
+                stream_disabled_since = now_monotonic
+            disabled_for = now_monotonic - stream_disabled_since
+            if disabled_for < STREAM_DISABLE_GRACE_SECONDS:
+                time.sleep(0.2)
+                continue
+
             if cap is not None:
                 cap.release()
                 cap = None

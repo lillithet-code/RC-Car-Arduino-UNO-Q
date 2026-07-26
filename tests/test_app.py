@@ -228,6 +228,7 @@ def test_stream_loss_refunds_and_allows_new_request(client):
 
     # Force stream staleness quickly and trigger refresh via a page request.
     client.application.config['STREAM_STALE_SECONDS'] = 0.0
+    client.application.config['STREAM_LOSS_GRACE_SECONDS'] = 0.0
     dashboard_response = client.get('/')
     assert dashboard_response.status_code == 200
 
