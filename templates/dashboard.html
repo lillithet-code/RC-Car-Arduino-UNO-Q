@@ -321,6 +321,16 @@
 
         if (!hasActiveSession || !streamReady) {
           hideStreamSurfaces();
+        } else if (usingWebRTC) {
+          if (streamVideo) {
+            streamVideo.style.display = 'block';
+            if (streamVideo.paused) {
+              streamVideo.play().catch(() => {});
+            }
+          }
+          if (streamImage) {
+            streamImage.style.display = 'none';
+          }
         } else if (!usingWebRTC && streamImage && !streamImage.src) {
           streamImage.style.display = 'block';
           streamImage.src = streamMjpegBaseUrl;
