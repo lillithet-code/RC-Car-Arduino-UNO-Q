@@ -13,6 +13,7 @@ BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
 VIDEO_DEVICE = int(os.environ.get('VIDEO_DEVICE', '0'))
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '20'))
 QUALITY = int(os.environ.get('JPEG_QUALITY', '70'))
+UPLOAD_TIMEOUT_SECONDS = float(os.environ.get('UPLOAD_TIMEOUT_SECONDS', '5.0'))
 
 
 def main():
@@ -40,7 +41,7 @@ def main():
             method='POST',
         )
         try:
-            urllib_request.urlopen(req, timeout=1)
+            urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
         except Exception as exc:
             print(f'Upload failed: {exc}', file=sys.stderr)
         time.sleep(1.0 / max(FRAME_RATE, 1))
