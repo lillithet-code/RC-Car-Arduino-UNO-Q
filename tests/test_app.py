@@ -326,6 +326,68 @@ def test_billing_pauses_when_stream_not_ready(client):
     assert remaining_after == remaining_before
 
 
+def test_billing_requires_client_visibility_heartbeat(client):
+    client.post('/register', data={
+        'username': 'tina',
+        'password': 'secret123',
+        'email': 'tina@example.com'
+    })
+    client.post('/login', data={
+        'username': 'tina',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-tina',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-tina')
+
+    request_response = client.post('/request_car')
+    assert request_response.status_code == 200
+
+    client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
+    start_response = client.post('/api/session/start')
+    assert start_response.status_code == 200
+
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE sessions SET last_billing_at = datetime('now', '-5 seconds') WHERE status = 'active'")
+        conn.commit()
+        conn.close()
+
+    # Keep stream ready but do not send visibility heartbeat.
+    client.post('/api/video/pipeline/frame', data=b'frame-2', content_type='image/jpeg')
+    before_status = client.get('/api/session/status').get_json()
+    before_remaining = before_status['remaining_seconds']
+
+    client.get('/')
+    no_visibility_status = client.get('/api/session/status').get_json()
+    assert no_visibility_status['remaining_seconds'] == before_remaining
+
+    # Send visibility heartbeat and verify billing resumes.
+    visibility_response = client.post('/api/session/visibility', json={'visible': True})
+    assert visibility_response.status_code == 200
+    client.post('/api/video/pipeline/frame', data=b'frame-3', content_type='image/jpeg')
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE sessions SET last_billing_at = datetime('now', '-3 seconds') WHERE status = 'active'")
+        conn.commit()
+        conn.close()
+
+    client.get('/')
+    with_visibility_status = client.get('/api/session/status').get_json()
+    assert with_visibility_status['remaining_seconds'] < before_remaining
+
+
 def test_release_still_works_when_stream_never_started(client):
     client.post('/register', data={
         'username': 'nina',

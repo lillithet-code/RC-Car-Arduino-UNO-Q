@@ -42,6 +42,7 @@ def create_app(test_config=None):
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '6.0'))
     app.config['STREAM_READY_WINDOW_SECONDS'] = max(1.0, float(os.environ.get('STREAM_READY_WINDOW_SECONDS', '2.0')))
     app.config['STREAM_READY_MIN_FRAMES'] = max(2, int(os.environ.get('STREAM_READY_MIN_FRAMES', '6')))
+    app.config['STREAM_VISIBILITY_TTL_SECONDS'] = max(1.0, float(os.environ.get('STREAM_VISIBILITY_TTL_SECONDS', '2.5')))
     app.config['STREAM_LOSS_GRACE_SECONDS'] = float(os.environ.get('STREAM_LOSS_GRACE_SECONDS', '30.0'))
     app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
     app.config['STREAM_CROP_BOTTOM_PX'] = max(0, int(os.environ.get('STREAM_CROP_BOTTOM_PX', '2')))
@@ -142,7 +143,7 @@ def create_app(test_config=None):
             consumed_seconds = max(0, int(row['consumed_seconds'] or 0))
             last_billing_at = parse_timestamp(row['last_billing_at']) or billing_started_at
 
-            if is_stream_ready(now):
+            if is_stream_ready(now) and is_session_visible(row['id'], now):
                 elapsed_seconds = max(0, int((now - last_billing_at).total_seconds()))
                 if elapsed_seconds > 0:
                     consumed_seconds = min(allocated_seconds, consumed_seconds + elapsed_seconds)
@@ -164,6 +165,7 @@ def create_app(test_config=None):
             if remaining_seconds <= 0:
                 db.execute("UPDATE sessions SET status = 'expired' WHERE id = ?", (row['id'],))
                 db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
+                mark_session_visible(row['id'], False)
                 changed = True
                 continue
 
@@ -180,6 +182,7 @@ def create_app(test_config=None):
                 db.execute("UPDATE sessions SET status = 'stream_lost' WHERE id = ?", (row['id'],))
                 db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (remaining_seconds, row['user_id']))
+                mark_session_visible(row['id'], False)
                 changed = True
 
         if changed:
@@ -230,6 +233,7 @@ def create_app(test_config=None):
     app_state = {
         'last_stream_at': None,
         'stream_frame_times': deque(maxlen=300),
+        'session_visible_at': {},
         'board_last_seen_at': None,
         'board_last_source': None,
         'board_last_poll_at': None,
@@ -338,6 +342,22 @@ def create_app(test_config=None):
         now = datetime.now(timezone.utc)
         app_state['last_stream_at'] = now
         app_state['stream_frame_times'].append(now)
+
+    def mark_session_visible(session_id, visible):
+        session_visible_at = app_state['session_visible_at']
+        key = int(session_id)
+        if visible:
+            session_visible_at[key] = datetime.now(timezone.utc)
+        else:
+            session_visible_at.pop(key, None)
+
+    def is_session_visible(session_id, now=None):
+        if now is None:
+            now = datetime.now(timezone.utc)
+        seen_at = app_state['session_visible_at'].get(int(session_id))
+        if seen_at is None:
+            return False
+        return (now - seen_at).total_seconds() <= app.config['STREAM_VISIBILITY_TTL_SECONDS']
 
     def h264_chunk_has_parameter_sets(data):
         # Annex-B NAL scan for SPS (7) and PPS (8). We decode only after both are seen.
@@ -751,6 +771,7 @@ def create_app(test_config=None):
             db.execute("UPDATE sessions SET status = 'released' WHERE id = ?", (releasable_session['id'],))
             if refundable_seconds > 0:
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refundable_seconds, session['user_id']))
+            mark_session_visible(releasable_session['id'], False)
             db.commit()
 
         sync_device_statuses(db)
@@ -779,9 +800,24 @@ def create_app(test_config=None):
             'remaining_seconds': get_remaining_seconds(session['user_id'], active_session),
             'stream_live': is_stream_live(),
             'stream_ready': is_stream_ready(),
+            'stream_visible': is_session_visible(active_session['id']),
             'billing_started': active_session['billing_started_at'] is not None,
             'device': active_session['name'],
         })
+
+    @app.route('/api/session/visibility', methods=['POST'])
+    def session_visibility():
+        if 'user_id' not in session:
+            return jsonify({'status': 'unauthorized'}), 401
+
+        active_session = get_active_session(session['user_id'])
+        if not active_session:
+            return jsonify({'status': 'ok', 'active': False})
+
+        payload = request.get_json(silent=True) or {}
+        visible = bool(payload.get('visible'))
+        mark_session_visible(active_session['id'], visible)
+        return jsonify({'status': 'ok', 'active': True, 'visible': visible})
 
     @app.route('/api/health')
     def health_check():

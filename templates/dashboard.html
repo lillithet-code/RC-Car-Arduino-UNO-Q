@@ -90,6 +90,7 @@
     let billingStarted = false;
     let startRequestInFlight = false;
     let fallbackFrameRendered = false;
+    let visibilityRequestInFlight = false;
 
     function hideStreamSurfaces() {
       if (streamVideo) {
@@ -136,6 +137,37 @@
         return Boolean(streamVideo && streamVideo.style.display !== 'none');
       }
       return Boolean(streamImage && streamImage.style.display !== 'none');
+    }
+
+    function isStreamActuallyVisible() {
+      if (!hasActiveSession || !streamReady || !isStreamSurfaceVisible()) {
+        return false;
+      }
+
+      if (usingWebRTC) {
+        return Boolean(streamVideo && streamVideo.readyState >= 2 && !streamVideo.paused && streamVideo.videoWidth > 0);
+      }
+
+      return Boolean(streamImage && fallbackFrameRendered && (streamImage.naturalWidth || 0) > 0);
+    }
+
+    async function postStreamVisibility() {
+      if (!hasActiveSession || visibilityRequestInFlight) {
+        return;
+      }
+
+      visibilityRequestInFlight = true;
+      try {
+        await fetch('/api/session/visibility', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ visible: isStreamActuallyVisible() }),
+        });
+      } catch (error) {
+        // Ignore transient heartbeat failures; next tick will retry.
+      } finally {
+        visibilityRequestInFlight = false;
+      }
     }
 
     async function maybeStartSessionBilling() {
@@ -366,6 +398,7 @@
           maybeStartSessionBilling();
         }
       }, streamRefreshIntervalMs);
+      setInterval(postStreamVisibility, 1000);
     }
 
     function sendAction(action) {
