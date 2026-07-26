@@ -1,5 +1,6 @@
 import os
 import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Queue
 from sqlite3 import dbapi2 as sqlite3
@@ -176,6 +177,22 @@ def create_app(test_config=None):
     pipeline_frame_counter = 0
     app_state = {'last_stream_at': None}
     peer_connections = set()
+
+    webrtc_loop = None
+    if WEBRTC_AVAILABLE:
+        webrtc_loop = asyncio.new_event_loop()
+
+        def run_webrtc_loop(loop):
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        threading.Thread(target=run_webrtc_loop, args=(webrtc_loop,), daemon=True).start()
+
+    def run_webrtc(coro, timeout=10):
+        if not WEBRTC_AVAILABLE or webrtc_loop is None:
+            raise RuntimeError('WebRTC backend not available')
+        future = asyncio.run_coroutine_threadsafe(coro, webrtc_loop)
+        return future.result(timeout=timeout)
 
     class StreamVideoTrack(VideoStreamTrack if WEBRTC_AVAILABLE else object):
         def __init__(self, frame_provider, fallback_width=640, fallback_height=480, fps=20):
@@ -424,23 +441,23 @@ def create_app(test_config=None):
         if not sdp or not offer_type:
             return jsonify({'status': 'error', 'message': 'invalid offer payload'}), 400
 
-        pc = RTCPeerConnection(
-            RTCConfiguration(
-                iceServers=[RTCIceServer(urls=['stun:stun.l.google.com:19302'])]
-            )
-        )
-        peer_connections.add(pc)
-
-        @pc.on('connectionstatechange')
-        async def on_connectionstatechange():
-            if pc.connectionState in {'failed', 'closed', 'disconnected'}:
-                await pc.close()
-                peer_connections.discard(pc)
-
-        track = StreamVideoTrack(lambda: latest_stream_chunk, fps=20)
-        pc.addTrack(track)
-
         async def handle_offer():
+            pc = RTCPeerConnection(
+                RTCConfiguration(
+                    iceServers=[RTCIceServer(urls=['stun:stun.l.google.com:19302'])]
+                )
+            )
+            peer_connections.add(pc)
+
+            @pc.on('connectionstatechange')
+            async def on_connectionstatechange():
+                if pc.connectionState in {'failed', 'closed', 'disconnected'}:
+                    await pc.close()
+                    peer_connections.discard(pc)
+
+            track = StreamVideoTrack(lambda: latest_stream_chunk, fps=20)
+            pc.addTrack(track)
+
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=offer_type))
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
@@ -461,19 +478,11 @@ def create_app(test_config=None):
                 'type': pc.localDescription.type,
             }
 
-        loop = asyncio.new_event_loop()
         try:
-            result = loop.run_until_complete(handle_offer())
+            result = run_webrtc(handle_offer())
             return jsonify(result)
         except Exception as exc:
-            try:
-                loop.run_until_complete(pc.close())
-            except Exception:
-                pass
-            peer_connections.discard(pc)
             return jsonify({'status': 'error', 'message': f'webrtc offer failed: {exc}'}), 500
-        finally:
-            loop.close()
 
     @app.route('/admin', methods=['GET', 'POST'])
     def admin():
