@@ -25,6 +25,7 @@ else
   HOST="${HOST:-0.0.0.0}"
 fi
 PORT="${PORT:-8000}"
+RUN_USER="${RUN_USER:-$(id -un)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="${SOURCE_DIR:-$SCRIPT_DIR}"
 mkdir -p "$APP_DIR"
@@ -81,17 +82,34 @@ PORT=$PORT
 EOF_ENV
 
 if [[ -n "$PLESK_DOMAIN" ]]; then
-  PLESK_VHOST_DIR="/var/www/vhosts/$PLESK_DOMAIN/conf"
-  if [[ -d "$PLESK_VHOST_DIR" ]]; then
+  PLESK_VHOST_DIR=""
+  for candidate in \
+    "/var/www/vhosts/system/$PLESK_DOMAIN/conf" \
+    "/var/www/vhosts/$PLESK_DOMAIN/conf"
+  do
+    if [[ -d "$candidate" ]]; then
+      PLESK_VHOST_DIR="$candidate"
+      break
+    fi
+  done
+
+  if [[ -n "$PLESK_VHOST_DIR" ]]; then
     sudo mkdir -p "$PLESK_VHOST_DIR"
-    sudo tee "$PLESK_VHOST_DIR/rc-car-proxy.conf" >/dev/null <<EOF_PLESK
-ProxyPreserveHost On
-ProxyPass / http://127.0.0.1:$PORT/
-ProxyPassReverse / http://127.0.0.1:$PORT/
+    sudo tee "$PLESK_VHOST_DIR/vhost_nginx.conf" >/dev/null <<EOF_PLESK
+location / {
+    proxy_pass http://127.0.0.1:$PORT;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+}
 EOF_PLESK
-    echo "Created Plesk reverse-proxy config at $PLESK_VHOST_DIR/rc-car-proxy.conf"
+    echo "Created Plesk reverse-proxy config at $PLESK_VHOST_DIR/vhost_nginx.conf"
+
+    if command -v plesk >/dev/null 2>&1; then
+      sudo plesk sbin httpdmng --reconfigure-domain "$PLESK_DOMAIN" || true
+    fi
   else
-    echo "Plesk domain directory not found at $PLESK_VHOST_DIR; please add a reverse proxy manually for $PLESK_DOMAIN"
+    echo "Plesk domain config directory not found; please add a reverse proxy manually for $PLESK_DOMAIN"
   fi
 fi
 
@@ -106,7 +124,7 @@ EnvironmentFile=$APP_DIR/.env
 ExecStart=$APP_DIR/.venv/bin/gunicorn --bind $HOST:$PORT app:app
 Restart=always
 RestartSec=5
-User=$USER
+User=$RUN_USER
 
 [Install]
 WantedBy=multi-user.target
