@@ -265,7 +265,7 @@ def main():
             time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
             continue
 
-        if selected_pipeline == 'h264_hw':
+        if selected_pipeline in {'h264_hw', 'h264_hw_strict'}:
             if h264_process is None:
                 try:
                     active_input = h264_input_formats[h264_input_index]
