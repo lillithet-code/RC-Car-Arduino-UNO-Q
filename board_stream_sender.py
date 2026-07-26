@@ -49,6 +49,8 @@ H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
 H264_ENCODERS = os.environ.get('H264_ENCODERS', 'h264_v4l2m2m,h264_omx').strip()
 H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536'))
 H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
+H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
+H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
 STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
 STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
@@ -411,6 +413,8 @@ def main():
     h264_failures = 0
     h264_upload_buffer = bytearray()
     h264_last_upload = time.monotonic()
+    h264_started_at = None
+    h264_last_chunk_at = None
     h264_batch_bytes = max(1024, H264_UPLOAD_BATCH_BYTES)
     h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
     poll_count = 0
@@ -451,6 +455,8 @@ def main():
                     active_input = h264_input_formats[h264_input_index]
                     active_encoder = h264_encoders[h264_encoder_index]
                     h264_process = start_h264_ffmpeg(active_input, active_encoder, active_video_device)
+                    h264_started_at = time.monotonic()
+                    h264_last_chunk_at = None
                 except Exception as exc:
                     if strict_hardware_only:
                         print(f'h264 pipeline start failed in strict mode; retrying: {exc}', file=sys.stderr)
@@ -485,6 +491,8 @@ def main():
                         active_video_device = recovered_device
 
                 h264_process = None
+                h264_started_at = None
+                h264_last_chunk_at = None
                 if h264_upload_buffer:
                     h264_upload_buffer.clear()
                 if h264_input_formats:
@@ -514,6 +522,29 @@ def main():
 
             ready, _, _ = select.select([h264_process.stdout], [], [], 0.5)
             if not ready:
+                now_monotonic = time.monotonic()
+                if h264_started_at is not None and h264_last_chunk_at is None and (now_monotonic - h264_started_at) >= H264_STARTUP_TIMEOUT_SECONDS:
+                    print(
+                        f'h264 pipeline produced no output for {H264_STARTUP_TIMEOUT_SECONDS:.1f}s; restarting encoder',
+                        file=sys.stderr,
+                    )
+                    h264_process.terminate()
+                    h264_process = None
+                    h264_started_at = None
+                    h264_last_chunk_at = None
+                    continue
+
+                if h264_last_chunk_at is not None and (now_monotonic - h264_last_chunk_at) >= H264_STALL_TIMEOUT_SECONDS:
+                    print(
+                        f'h264 pipeline stalled for {H264_STALL_TIMEOUT_SECONDS:.1f}s; restarting encoder',
+                        file=sys.stderr,
+                    )
+                    h264_process.terminate()
+                    h264_process = None
+                    h264_started_at = None
+                    h264_last_chunk_at = None
+                    continue
+
                 if h264_upload_buffer and (time.monotonic() - h264_last_upload) >= h264_max_delay:
                     flush_started = time.monotonic()
                     flush_size = len(h264_upload_buffer)
@@ -555,6 +586,8 @@ def main():
             if not chunk:
                 time.sleep(0.05)
                 continue
+
+            h264_last_chunk_at = time.monotonic()
 
             h264_upload_buffer.extend(chunk)
             should_flush = (
