@@ -17,6 +17,7 @@ fi
 
 VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
 SECRET_KEY="${SECRET_KEY:-change-me}"
+BOARD_TOKEN="${BOARD_TOKEN:-dev-board-token}"
 DATABASE_URL="${DATABASE_URL:-sqlite:///$APP_DIR/app.db}"
 if [[ -n "$PLESK_DOMAIN" ]]; then
   HOST="${HOST:-127.0.0.1}"
@@ -49,6 +50,7 @@ python3 -m venv "$VENV_DIR"
 
 cat > "$APP_DIR/.env" <<EOF_ENV
 SECRET_KEY=$SECRET_KEY
+BOARD_TOKEN=$BOARD_TOKEN
 DATABASE_URL=$DATABASE_URL
 HOST=$HOST
 PORT=$PORT
