@@ -42,7 +42,7 @@ FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
 H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
-H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))) )
+H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
 H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '8192'))
 H264_INPUT_FORMATS = os.environ.get('H264_INPUT_FORMATS', '').strip()
 H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
@@ -176,7 +176,8 @@ def get_h264_input_formats():
         if values:
             return values
 
-    defaults = [normalize_input_format(CAMERA_FOURCC), 'yuyv422', 'uyvy422']
+    # Prefer raw formats first for faster and more stable HW encoder startup.
+    defaults = ['yuyv422', 'uyvy422', normalize_input_format(CAMERA_FOURCC)]
     ordered = []
     for item in defaults:
         if item not in ordered:
@@ -317,6 +318,8 @@ def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
     if encoder_mode not in {'auto', 'copy', 'transcode'}:
         encoder_mode = 'auto'
 
+    effective_gop = max(1, min(H264_GOP, int(max(1, FRAME_RATE))))
+
     use_copy = encoder_mode == 'copy' or (encoder_mode == 'auto' and input_format == 'h264')
 
     command = [
@@ -343,7 +346,7 @@ def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
             '-vf', 'format=nv12',
             '-c:v', encoder_name,
             '-pix_fmt', 'nv12',
-            '-g', str(max(1, H264_GOP)),
+            '-g', str(effective_gop),
             '-bf', '0',
             '-b:v', H264_BITRATE,
             '-maxrate', H264_MAXRATE,
