@@ -35,6 +35,8 @@ H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '8192'))
 H264_INPUT_FORMATS = os.environ.get('H264_INPUT_FORMATS', '').strip()
 H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
 H264_ENCODERS = os.environ.get('H264_ENCODERS', 'h264_v4l2m2m,h264_omx').strip()
+H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536'))
+H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
 
 
 def get_h264_encoders():
@@ -187,6 +189,10 @@ def main():
         f'h264_encoders={"|".join(h264_encoders)}'
     )
     h264_failures = 0
+    h264_upload_buffer = bytearray()
+    h264_last_upload = time.monotonic()
+    h264_batch_bytes = max(1024, H264_UPLOAD_BATCH_BYTES)
+    h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
 
     while True:
         stream_enabled = fetch_stream_enabled()
@@ -205,6 +211,8 @@ def main():
                 h264_process.terminate()
                 h264_process = None
                 print('h264 encoder stopped while idle')
+            if h264_upload_buffer:
+                h264_upload_buffer.clear()
             time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
             continue
 
@@ -239,6 +247,8 @@ def main():
                     print('h264 encoder exited; restarting', file=sys.stderr)
 
                 h264_process = None
+                if h264_upload_buffer:
+                    h264_upload_buffer.clear()
                 if h264_input_formats:
                     h264_input_index = (h264_input_index + 1) % len(h264_input_formats)
                     print(
@@ -268,6 +278,14 @@ def main():
 
             ready, _, _ = select.select([h264_process.stdout], [], [], 0.5)
             if not ready:
+                if h264_upload_buffer and (time.monotonic() - h264_last_upload) >= h264_max_delay:
+                    try:
+                        post_bytes(STREAM_H264_ENDPOINT, bytes(h264_upload_buffer), 'video/h264')
+                        h264_upload_buffer.clear()
+                        h264_last_upload = time.monotonic()
+                        h264_failures = 0
+                    except Exception as exc:
+                        print(f'H264 upload failed: {exc}', file=sys.stderr)
                 continue
 
             chunk = h264_process.stdout.read(max(1024, H264_CHUNK_BYTES))
@@ -275,8 +293,19 @@ def main():
                 time.sleep(0.05)
                 continue
 
+            h264_upload_buffer.extend(chunk)
+            should_flush = (
+                len(h264_upload_buffer) >= h264_batch_bytes
+                or (time.monotonic() - h264_last_upload) >= h264_max_delay
+            )
+
+            if not should_flush:
+                continue
+
             try:
-                post_bytes(STREAM_H264_ENDPOINT, chunk, 'video/h264')
+                post_bytes(STREAM_H264_ENDPOINT, bytes(h264_upload_buffer), 'video/h264')
+                h264_upload_buffer.clear()
+                h264_last_upload = time.monotonic()
                 h264_failures = 0
             except Exception as exc:
                 print(f'H264 upload failed: {exc}', file=sys.stderr)
