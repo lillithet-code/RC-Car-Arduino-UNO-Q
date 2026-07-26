@@ -59,7 +59,7 @@
         <div class="session-layout">
           <div class="video-panel">
             <video id="stream-video" class="stream" autoplay playsinline muted></video>
-            <img id="stream-image" class="stream" src="{{ url_for('video_feed', mode='single') }}" alt="Live video stream fallback" style="display:none;">
+            <img id="stream-image" class="stream" src="{{ url_for('video_feed') }}" alt="Live video stream fallback" style="display:none;">
           </div>
           <div class="joystick-panel">
             <div class="joystick" id="joystick">
@@ -78,8 +78,8 @@
     const streamVideo = document.getElementById('stream-video');
     const streamImage = document.getElementById('stream-image');
     const remainingTime = document.getElementById('remaining-time');
-    const streamSingleBaseUrl = '{{ url_for('video_feed', mode='single') }}';
-    const streamRefreshIntervalMs = 90;
+    const streamMjpegBaseUrl = '{{ url_for('video_feed') }}';
+    const streamRefreshIntervalMs = 500;
     let dragging = false;
     let streamLive = false;
     let hasActiveSession = false;
@@ -155,15 +155,7 @@
       }
     }
 
-    function refreshStreamFrame() {
-      if (!streamImage) {
-        return;
-      }
-      fallbackFrameRendered = false;
-      streamImage.src = `${streamSingleBaseUrl}&t=${Date.now()}`;
-    }
-
-    function enableSnapshotFallback() {
+    function enableMjpegFallback() {
       usingWebRTC = false;
       if (streamVideo) {
         streamVideo.style.display = 'none';
@@ -171,12 +163,15 @@
       }
       if (streamImage) {
         streamImage.style.display = 'block';
+        if (streamImage.src !== streamMjpegBaseUrl) {
+          streamImage.src = streamMjpegBaseUrl;
+        }
       }
     }
 
     async function setupWebRTC() {
       if (!window.RTCPeerConnection || !streamVideo) {
-        enableSnapshotFallback();
+        enableMjpegFallback();
         return;
       }
 
@@ -237,7 +232,7 @@
 
         peerConnection.onconnectionstatechange = () => {
           if (['failed', 'closed', 'disconnected'].includes(peerConnection.connectionState)) {
-            enableSnapshotFallback();
+            enableMjpegFallback();
           }
         };
 
@@ -272,8 +267,8 @@
 
         await peerConnection.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
       } catch (error) {
-        console.warn('WebRTC setup failed, using snapshot fallback:', error);
-        enableSnapshotFallback();
+        console.warn('WebRTC setup failed, using MJPEG fallback:', error);
+        enableMjpegFallback();
       }
     }
 
@@ -292,10 +287,6 @@
         hasActiveSession = Boolean(payload.active);
         streamLive = Boolean(payload.stream_live);
         billingStarted = Boolean(payload.billing_started);
-
-        if (hasActiveSession && streamLive && !usingWebRTC) {
-          refreshStreamFrame();
-        }
 
         if (!usingWebRTC && hasActiveSession && streamLive) {
           maybeStartSessionBilling();
@@ -316,7 +307,6 @@
         });
       }
       setupWebRTC();
-      refreshStreamFrame();
       pollSessionStatus();
       setInterval(pollSessionStatus, 1000);
       setInterval(() => {
@@ -325,9 +315,6 @@
         }
         if (usingWebRTC) {
           maybeStartSessionBilling();
-        }
-        if (hasActiveSession && streamLive && !usingWebRTC) {
-          refreshStreamFrame();
         }
       }, streamRefreshIntervalMs);
     }
