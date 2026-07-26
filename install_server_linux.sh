@@ -37,6 +37,7 @@ if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
       --exclude '.git/' \
       --exclude '.venv/' \
       --exclude '__pycache__/' \
+      --exclude '.env' \
       --exclude 'app.db' \
       "$SOURCE_DIR/" "$APP_DIR/"
   else
