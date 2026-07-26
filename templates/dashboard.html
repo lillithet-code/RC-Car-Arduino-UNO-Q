@@ -77,7 +77,10 @@
     const streamImage = document.getElementById('stream-image');
     const remainingTime = document.getElementById('remaining-time');
     const streamSingleBaseUrl = '{{ url_for('video_feed', mode='single') }}';
+    const streamRefreshIntervalMs = 90;
     let dragging = false;
+    let streamLive = false;
+    let hasActiveSession = false;
 
     function formatSeconds(totalSeconds) {
       const safe = Math.max(0, Number(totalSeconds) || 0);
@@ -121,12 +124,14 @@
         }
 
         renderRemainingSeconds(payload.remaining_seconds, payload.billing_started);
+        hasActiveSession = Boolean(payload.active);
+        streamLive = Boolean(payload.stream_live);
 
-        if (payload.active && payload.stream_live) {
+        if (hasActiveSession && streamLive) {
           refreshStreamFrame();
         }
 
-        if (!payload.active && joystick) {
+        if (!hasActiveSession && joystick) {
           window.location.reload();
         }
       } catch (error) {
@@ -138,6 +143,11 @@
       refreshStreamFrame();
       pollSessionStatus();
       setInterval(pollSessionStatus, 1000);
+      setInterval(() => {
+        if (hasActiveSession && streamLive) {
+          refreshStreamFrame();
+        }
+      }, streamRefreshIntervalMs);
     }
 
     function sendAction(action) {

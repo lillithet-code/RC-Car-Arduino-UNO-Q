@@ -25,8 +25,10 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, FRAME_RATE)
+    frame_period = 1.0 / max(FRAME_RATE, 1)
 
     while True:
+        frame_started = time.monotonic()
         ok, frame = cap.read()
         if not ok:
             time.sleep(0.01)
@@ -44,7 +46,11 @@ def main():
             urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
         except Exception as exc:
             print(f'Upload failed: {exc}', file=sys.stderr)
-        time.sleep(1.0 / max(FRAME_RATE, 1))
+
+        elapsed = time.monotonic() - frame_started
+        remaining = frame_period - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
 
 
 if __name__ == '__main__':
