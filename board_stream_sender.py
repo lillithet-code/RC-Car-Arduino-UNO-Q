@@ -33,6 +33,7 @@ H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))) )
 H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '8192'))
 H264_INPUT_FORMATS = os.environ.get('H264_INPUT_FORMATS', '').strip()
+H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
 
 
 def get_h264_input_formats():
@@ -104,6 +105,12 @@ def post_bytes(url, payload, content_type):
 
 
 def start_h264_ffmpeg(input_format):
+    encoder_mode = H264_ENCODER_MODE
+    if encoder_mode not in {'auto', 'copy', 'transcode'}:
+        encoder_mode = 'auto'
+
+    use_copy = encoder_mode == 'copy' or (encoder_mode == 'auto' and input_format == 'h264')
+
     command = [
         FFMPEG_BIN,
         '-hide_banner',
@@ -115,19 +122,30 @@ def start_h264_ffmpeg(input_format):
         '-framerate', str(FRAME_RATE),
         '-i', f'/dev/video{VIDEO_DEVICE}',
         '-an',
-        '-vf', 'format=nv12',
-        '-c:v', 'h264_v4l2m2m',
-        '-pix_fmt', 'nv12',
-        '-g', str(max(1, H264_GOP)),
-        '-bf', '0',
-        '-b:v', H264_BITRATE,
-        '-maxrate', H264_MAXRATE,
-        '-bufsize', H264_BUFSIZE,
-        '-f', 'h264',
-        '-',
     ]
 
-    print(f'starting h264 pipeline input_format={input_format}: {" ".join(command)}')
+    if use_copy:
+        command.extend([
+            '-c:v', 'copy',
+            '-f', 'h264',
+            '-',
+        ])
+    else:
+        command.extend([
+            '-vf', 'format=nv12',
+            '-c:v', 'h264_v4l2m2m',
+            '-pix_fmt', 'nv12',
+            '-g', str(max(1, H264_GOP)),
+            '-bf', '0',
+            '-b:v', H264_BITRATE,
+            '-maxrate', H264_MAXRATE,
+            '-bufsize', H264_BUFSIZE,
+            '-f', 'h264',
+            '-',
+        ])
+
+    mode_label = 'copy' if use_copy else 'transcode'
+    print(f'starting h264 pipeline mode={mode_label} input_format={input_format}: {" ".join(command)}')
     return subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -146,11 +164,13 @@ def main():
     selected_pipeline = STREAM_PIPELINE
     if selected_pipeline == 'auto':
         selected_pipeline = 'h264_hw'
-    if selected_pipeline not in {'h264_hw', 'mjpg'}:
+    if selected_pipeline not in {'h264_hw', 'h264_hw_strict', 'mjpg'}:
         selected_pipeline = 'mjpg'
+    strict_hardware_only = selected_pipeline == 'h264_hw_strict'
     print(
         f'selected stream pipeline: {selected_pipeline} '
-        f'h264_input_formats={"|".join(h264_input_formats)}'
+        f'h264_input_formats={"|".join(h264_input_formats)} '
+        f'h264_encoder_mode={H264_ENCODER_MODE}'
     )
     h264_failures = 0
 
@@ -180,6 +200,10 @@ def main():
                     active_input = h264_input_formats[h264_input_index]
                     h264_process = start_h264_ffmpeg(active_input)
                 except Exception as exc:
+                    if strict_hardware_only:
+                        print(f'h264 pipeline start failed in strict mode; retrying: {exc}', file=sys.stderr)
+                        time.sleep(0.5)
+                        continue
                     print(f'h264 pipeline start failed, fallback to mjpg: {exc}', file=sys.stderr)
                     selected_pipeline = 'mjpg'
                     continue
@@ -207,11 +231,17 @@ def main():
                         file=sys.stderr,
                     )
                 if exit_code == -11:
-                    print('h264 encoder crashed with segmentation fault; falling back to mjpg pipeline', file=sys.stderr)
-                    selected_pipeline = 'mjpg'
+                    if strict_hardware_only:
+                        print('h264 encoder crashed with segmentation fault; strict mode keeps hardware-only retries', file=sys.stderr)
+                    else:
+                        print('h264 encoder crashed with segmentation fault; falling back to mjpg pipeline', file=sys.stderr)
+                        selected_pipeline = 'mjpg'
                 elif h264_failures >= 5:
-                    print('h264 encoder repeatedly failed; falling back to mjpg pipeline', file=sys.stderr)
-                    selected_pipeline = 'mjpg'
+                    if strict_hardware_only:
+                        print('h264 encoder repeatedly failed; strict mode keeps hardware-only retries', file=sys.stderr)
+                    else:
+                        print('h264 encoder repeatedly failed; falling back to mjpg pipeline', file=sys.stderr)
+                        selected_pipeline = 'mjpg'
                 time.sleep(0.2)
                 continue
 

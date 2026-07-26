@@ -181,6 +181,7 @@ def create_app(test_config=None):
     app_state = {'last_stream_at': None}
     peer_connections = set()
     h264_decoder = CodecContext.create('h264', 'r') if CodecContext is not None else None
+    h264_parse_errors = 0
 
     webrtc_loop = None
     if WEBRTC_AVAILABLE:
@@ -617,6 +618,7 @@ def create_app(test_config=None):
     @app.route('/api/video/h264/chunk', methods=['POST'])
     def api_video_h264_chunk():
         nonlocal latest_stream_chunk, pipeline_frame_counter
+        nonlocal h264_parse_errors
 
         token = request.headers.get('X-Board-Token', '')
         if token != app.config['BOARD_TOKEN']:
@@ -632,26 +634,42 @@ def create_app(test_config=None):
         mark_stream_activity()
 
         decoded_any = False
+        packets = []
         try:
-            packets = [Packet(data)]
-            for packet in packets:
+            parsed_packets = h264_decoder.parse(data)
+            if parsed_packets:
+                packets.extend(parsed_packets)
+        except Exception:
+            # Parsing can fail on partial chunk boundaries; keep ingesting future chunks.
+            h264_parse_errors += 1
+            if h264_parse_errors <= 3 or h264_parse_errors % 100 == 0:
+                app.logger.warning('h264 parse failed on chunk; waiting for more data')
+
+        if not packets:
+            try:
+                packets = [Packet(data)]
+            except Exception:
+                packets = []
+
+        for packet in packets:
+            try:
                 frames = h264_decoder.decode(packet)
-                for frame in frames:
-                    frame_bgr = frame.to_ndarray(format='bgr24')
-                    ok, encoded = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-                    if not ok:
-                        continue
-                    latest_stream_chunk = encoded.tobytes()
-                    if stream_queue.full():
-                        try:
-                            stream_queue.get_nowait()
-                        except Empty:
-                            pass
-                    stream_queue.put(latest_stream_chunk)
-                    pipeline_frame_counter += 1
-                    decoded_any = True
-        except Exception as exc:
-            return jsonify({'status': 'error', 'message': f'h264 decode failed: {exc}'}), 400
+            except Exception:
+                continue
+            for frame in frames:
+                frame_bgr = frame.to_ndarray(format='bgr24')
+                ok, encoded = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                if not ok:
+                    continue
+                latest_stream_chunk = encoded.tobytes()
+                if stream_queue.full():
+                    try:
+                        stream_queue.get_nowait()
+                    except Empty:
+                        pass
+                stream_queue.put(latest_stream_chunk)
+                pipeline_frame_counter += 1
+                decoded_any = True
 
         return jsonify({'status': 'ok', 'decoded': decoded_any, 'frame_id': pipeline_frame_counter})
 
