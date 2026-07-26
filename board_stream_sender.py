@@ -228,6 +228,8 @@ def main():
         f'h264_encoder_mode={H264_ENCODER_MODE} '
         f'h264_encoders={"|".join(h264_encoders)}'
     )
+    if selected_pipeline in {'h264_hw', 'h264_hw_strict'}:
+        print('stream profile path=h264_hw hardware_only_fallback=disabled')
     if STREAM_PROFILE:
         print(f'stream profiling enabled every={STREAM_PROFILE_EVERY}')
         print(f'stream profiling heartbeat polls={STREAM_PROFILE_HEARTBEAT_POLLS}')
@@ -274,8 +276,7 @@ def main():
                         print(f'h264 pipeline start failed in strict mode; retrying: {exc}', file=sys.stderr)
                         time.sleep(0.5)
                         continue
-                    print(f'h264 pipeline start failed, fallback to mjpg: {exc}', file=sys.stderr)
-                    selected_pipeline = 'mjpg'
+                    print(f'h264 pipeline start failed; staying on hardware path: {exc}', file=sys.stderr)
                     continue
 
             if h264_process.poll() is not None:
@@ -312,14 +313,12 @@ def main():
                     if strict_hardware_only:
                         print('h264 encoder crashed with segmentation fault; strict mode keeps hardware-only retries', file=sys.stderr)
                     else:
-                        print('h264 encoder crashed with segmentation fault; falling back to mjpg pipeline', file=sys.stderr)
-                        selected_pipeline = 'mjpg'
+                        print('h264 encoder crashed with segmentation fault; staying on hardware path', file=sys.stderr)
                 elif h264_failures >= 5:
                     if strict_hardware_only:
                         print('h264 encoder repeatedly failed; strict mode keeps hardware-only retries', file=sys.stderr)
                     else:
-                        print('h264 encoder repeatedly failed; falling back to mjpg pipeline', file=sys.stderr)
-                        selected_pipeline = 'mjpg'
+                        print('h264 encoder repeatedly failed; staying on hardware path', file=sys.stderr)
                 time.sleep(0.2)
                 continue
 
