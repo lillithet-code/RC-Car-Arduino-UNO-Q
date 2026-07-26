@@ -25,7 +25,31 @@ else
   HOST="${HOST:-0.0.0.0}"
 fi
 PORT="${PORT:-8000}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="${SOURCE_DIR:-$SCRIPT_DIR}"
 mkdir -p "$APP_DIR"
+
+if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
+  echo "Syncing source files from $SOURCE_DIR to $APP_DIR"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a \
+      --exclude '.git/' \
+      --exclude '.venv/' \
+      --exclude '__pycache__/' \
+      --exclude 'app.db' \
+      "$SOURCE_DIR/" "$APP_DIR/"
+  else
+    cp -a "$SOURCE_DIR/." "$APP_DIR/"
+    rm -rf "$APP_DIR/.git" "$APP_DIR/.venv" "$APP_DIR/__pycache__" 2>/dev/null || true
+  fi
+fi
+
+if [[ ! -f "$APP_DIR/requirements.txt" ]]; then
+  echo "Error: requirements.txt not found in APP_DIR=$APP_DIR" >&2
+  echo "Set SOURCE_DIR to a valid project checkout before running installer." >&2
+  exit 1
+fi
+
 cd "$APP_DIR"
 
 echo "Installing application for domain: $PLESK_DOMAIN"
