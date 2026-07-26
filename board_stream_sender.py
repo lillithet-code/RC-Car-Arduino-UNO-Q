@@ -3,10 +3,12 @@ import json
 import http.client
 import glob
 import os
+import queue
 import re
 import select
 import subprocess
 import sys
+import threading
 import time
 import ssl
 import socket
@@ -52,12 +54,14 @@ H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
 H264_ENCODERS = os.environ.get('H264_ENCODERS', 'h264_v4l2m2m,h264_omx').strip()
 H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536'))
 H264_UPLOAD_MIN_FLUSH_BYTES = int(os.environ.get('H264_UPLOAD_MIN_FLUSH_BYTES', '16384'))
-H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '120'))
+H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '40'))
+H264_UPLOAD_QUEUE_MAX = max(1, int(os.environ.get('H264_UPLOAD_QUEUE_MAX', '3')))
 H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
 H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
 H264_UPLOAD_RETRY_ONCE = os.environ.get('H264_UPLOAD_RETRY_ONCE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 H264_UPLOAD_PROFILE_MS = max(0.0, float(os.environ.get('H264_UPLOAD_PROFILE_MS', '120.0')))
+H264_LOW_LATENCY_FLAGS = os.environ.get('H264_LOW_LATENCY_FLAGS', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
 STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
@@ -365,6 +369,38 @@ def post_h264_with_retry(payload):
     return False
 
 
+def enqueue_h264_payload(upload_queue, payload):
+    if not payload:
+        return
+
+    try:
+        upload_queue.put_nowait(payload)
+        return
+    except queue.Full:
+        pass
+
+    # Latency-first behavior: drop the oldest batch when network is backpressured.
+    try:
+        upload_queue.get_nowait()
+    except queue.Empty:
+        pass
+
+    try:
+        upload_queue.put_nowait(payload)
+    except queue.Full:
+        pass
+
+
+def h264_upload_worker(upload_queue, stop_event):
+    while not stop_event.is_set() or not upload_queue.empty():
+        try:
+            payload = upload_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        post_h264_with_retry(payload)
+
+
 def log_profile_summary(*, path, event_count, total_elapsed, read_elapsed=None, post_elapsed=None, encode_elapsed=None, upload_bytes=None, extra=None):
     if not STREAM_PROFILE or event_count <= 0:
         return
@@ -421,12 +457,18 @@ def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
             '-',
         ])
     else:
+        low_latency_args = []
+        if H264_LOW_LATENCY_FLAGS:
+            low_latency_args = ['-tune', 'zerolatency']
+
         command.extend([
             '-vf', 'format=nv12',
             '-c:v', encoder_name,
             '-pix_fmt', 'nv12',
             '-g', str(effective_gop),
             '-bf', '0',
+            *low_latency_args,
+            '-threads', '1',
             '-bsf:v', 'dump_extra',
             '-b:v', H264_BITRATE,
             '-maxrate', H264_MAXRATE,
@@ -434,6 +476,8 @@ def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
             '-f', 'h264',
             '-',
         ])
+        if H264_LOW_LATENCY_FLAGS:
+            command[1:1] = ['-flags', 'low_delay']
 
     mode_label = 'copy' if use_copy else 'transcode'
     print(
@@ -494,6 +538,14 @@ def main():
     h264_batch_bytes = max(1024, H264_UPLOAD_BATCH_BYTES)
     h264_min_flush_bytes = max(1024, min(h264_batch_bytes, H264_UPLOAD_MIN_FLUSH_BYTES))
     h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
+    h264_upload_queue = queue.Queue(maxsize=H264_UPLOAD_QUEUE_MAX)
+    h264_upload_stop = threading.Event()
+    h264_upload_thread = threading.Thread(
+        target=h264_upload_worker,
+        args=(h264_upload_queue, h264_upload_stop),
+        daemon=True,
+    )
+    h264_upload_thread.start()
     next_video_probe_at = 0.0
     stream_disabled_since = None
     stream_enabled = False
@@ -544,6 +596,11 @@ def main():
                 print('h264 encoder stopped while idle')
             if h264_upload_buffer:
                 h264_upload_buffer.clear()
+            while True:
+                try:
+                    h264_upload_queue.get_nowait()
+                except queue.Empty:
+                    break
             if STREAM_PROFILE and (poll_count <= 3 or poll_count % STREAM_PROFILE_HEARTBEAT_POLLS == 0):
                 log_profile_event(path=selected_pipeline, message='idle waiting_for_session')
             time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
@@ -678,18 +735,17 @@ def main():
                 if h264_upload_buffer and (time.monotonic() - h264_last_upload) >= h264_max_delay:
                     flush_started = time.monotonic()
                     flush_size = len(h264_upload_buffer)
-                    if post_h264_with_retry(bytes(h264_upload_buffer)):
-                        h264_upload_buffer.clear()
-                        h264_last_upload = time.monotonic()
-                        h264_failures = 0
-                        if STREAM_PROFILE:
-                            profile_post_elapsed += time.monotonic() - flush_started
-                            profile_upload_bytes += flush_size
-                            profile_event_count += 1
-                            log_profile_event(
-                                path='h264_hw',
-                                message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
-                            )
+                    enqueue_h264_payload(h264_upload_queue, bytes(h264_upload_buffer))
+                    h264_upload_buffer.clear()
+                    h264_last_upload = time.monotonic()
+                    if STREAM_PROFILE:
+                        profile_post_elapsed += time.monotonic() - flush_started
+                        profile_upload_bytes += flush_size
+                        profile_event_count += 1
+                        log_profile_event(
+                            path='h264_hw',
+                            message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
+                        )
                     if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
                         profile_total_elapsed = time.monotonic() - profile_window_started
                         log_profile_summary(
@@ -730,18 +786,17 @@ def main():
 
             post_started = time.monotonic()
             flush_size = len(h264_upload_buffer)
-            if post_h264_with_retry(bytes(h264_upload_buffer)):
-                h264_upload_buffer.clear()
-                h264_last_upload = time.monotonic()
-                h264_failures = 0
-                if STREAM_PROFILE:
-                    profile_post_elapsed += time.monotonic() - post_started
-                    profile_upload_bytes += flush_size
-                    profile_event_count += 1
-                    log_profile_event(
-                        path='h264_hw',
-                        message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
-                    )
+            enqueue_h264_payload(h264_upload_queue, bytes(h264_upload_buffer))
+            h264_upload_buffer.clear()
+            h264_last_upload = time.monotonic()
+            if STREAM_PROFILE:
+                profile_post_elapsed += time.monotonic() - post_started
+                profile_upload_bytes += flush_size
+                profile_event_count += 1
+                log_profile_event(
+                    path='h264_hw',
+                    message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
+                )
             if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
                 profile_total_elapsed = time.monotonic() - profile_window_started
                 log_profile_summary(
@@ -825,6 +880,9 @@ def main():
         remaining = frame_period - elapsed
         if remaining > 0:
             time.sleep(remaining)
+
+    h264_upload_stop.set()
+    h264_upload_thread.join(timeout=1.0)
 
 
 if __name__ == '__main__':
