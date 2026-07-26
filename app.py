@@ -242,17 +242,6 @@ def create_app(test_config=None):
         now = datetime.now(timezone.utc)
         app_state['last_stream_at'] = now
 
-        db = get_db()
-        waiting_session = db.execute(
-            "SELECT id FROM sessions WHERE status = 'active' AND billing_started_at IS NULL ORDER BY id LIMIT 1"
-        ).fetchone()
-        if waiting_session:
-            db.execute(
-                "UPDATE sessions SET billing_started_at = ? WHERE id = ?",
-                (now.strftime('%Y-%m-%d %H:%M:%S'), waiting_session['id'])
-            )
-            db.commit()
-
     @app.before_request
     def ensure_session_state():
         if 'user_id' in session:
@@ -344,7 +333,7 @@ def create_app(test_config=None):
 
         db = get_db()
         user = get_user_view(session['user_id'])
-        duration_seconds = min(app.config['SESSION_DURATION_SECONDS'], max(0, int(user['balance'])))
+        duration_seconds = max(0, int(user['balance']))
         active_session = get_active_session(session['user_id'])
         remaining_seconds = get_remaining_seconds(session['user_id'], active_session)
         if active_session:
@@ -422,6 +411,31 @@ def create_app(test_config=None):
             'stream_live': is_stream_live(),
             'billing_started': active_session['billing_started_at'] is not None,
             'device': active_session['name'],
+        })
+
+    @app.route('/api/session/start', methods=['POST'])
+    def session_start():
+        if 'user_id' not in session:
+            return jsonify({'status': 'unauthorized'}), 401
+
+        active_session = get_active_session(session['user_id'])
+        if not active_session:
+            return jsonify({'status': 'error', 'message': 'no active session'}), 400
+
+        if not is_stream_live():
+            return jsonify({'status': 'error', 'message': 'stream not live'}), 409
+
+        if active_session['billing_started_at'] is None:
+            now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            db = get_db()
+            db.execute('UPDATE sessions SET billing_started_at = ? WHERE id = ?', (now, active_session['id']))
+            db.commit()
+            active_session = get_active_session(session['user_id'])
+
+        return jsonify({
+            'status': 'ok',
+            'billing_started': True,
+            'remaining_seconds': get_remaining_seconds(session['user_id'], active_session),
         })
 
     @app.route('/api/webrtc/offer', methods=['POST'])

@@ -32,7 +32,7 @@
       <div class="hero">
         <div>
           <h1>Welcome, {{ user.username }}</h1>
-          <div class="pill">Remaining time: <span id="remaining-time" data-seconds="{{ remaining_seconds if active_session else '' }}">{{ remaining_seconds if remaining_seconds is not none else user.balance }}s</span></div>
+          <div class="pill">Remaining time: <span id="remaining-time" data-seconds="{{ remaining_seconds if remaining_seconds is not none else user.balance }}">{{ remaining_seconds if remaining_seconds is not none else user.balance }}</span></div>
         </div>
         <div class="top-actions">
           {% if user.is_admin %}<a href="{{ url_for('admin') }}">Admin panel</a>{% endif %}
@@ -86,6 +86,8 @@
     let peerConnection = null;
     let usingWebRTC = false;
     let activeStreamId = null;
+    let billingStarted = false;
+    let startRequestInFlight = false;
 
     function formatSeconds(totalSeconds) {
       const safe = Math.max(0, Number(totalSeconds) || 0);
@@ -98,15 +100,50 @@
       return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     }
 
-    function renderRemainingSeconds(remainingSeconds, billingStarted) {
+    function renderRemainingSeconds(remainingSeconds, hasSession, billingIsStarted) {
       if (!remainingTime) {
         return;
       }
       const safe = Math.max(0, Number(remainingSeconds) || 0);
-      if (billingStarted) {
-        remainingTime.textContent = `${formatSeconds(safe)} (${safe}s)`;
+      if (!hasSession) {
+        remainingTime.textContent = formatSeconds(safe);
+        return;
+      }
+      if (billingIsStarted) {
+        remainingTime.textContent = formatSeconds(safe);
       } else {
-        remainingTime.textContent = `${safe}s (waiting for stream)`;
+        remainingTime.textContent = `${formatSeconds(safe)} (waiting for stream)`;
+      }
+    }
+
+    async function maybeStartSessionBilling() {
+      if (!hasActiveSession || billingStarted || !streamLive || startRequestInFlight) {
+        return;
+      }
+
+      // Start billing only when playback is actually running.
+      if (usingWebRTC && (!streamVideo || streamVideo.readyState < 2 || streamVideo.paused)) {
+        return;
+      }
+
+      startRequestInFlight = true;
+      try {
+        const response = await fetch('/api/session/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (payload.status === 'ok' && payload.billing_started) {
+          billingStarted = true;
+          renderRemainingSeconds(payload.remaining_seconds, true, true);
+        }
+      } catch (error) {
+        // Retry on next poll interval.
+      } finally {
+        startRequestInFlight = false;
       }
     }
 
@@ -242,12 +279,17 @@
           return;
         }
 
-        renderRemainingSeconds(payload.remaining_seconds, payload.billing_started);
+        renderRemainingSeconds(payload.remaining_seconds, payload.active, payload.billing_started);
         hasActiveSession = Boolean(payload.active);
         streamLive = Boolean(payload.stream_live);
+        billingStarted = Boolean(payload.billing_started);
 
         if (hasActiveSession && streamLive && !usingWebRTC) {
           refreshStreamFrame();
+        }
+
+        if (!usingWebRTC && hasActiveSession && streamLive) {
+          maybeStartSessionBilling();
         }
 
         if (!hasActiveSession && joystick) {
@@ -266,6 +308,9 @@
       setInterval(() => {
         if (usingWebRTC && streamVideo && streamVideo.paused) {
           streamVideo.play().catch(() => {});
+        }
+        if (usingWebRTC) {
+          maybeStartSessionBilling();
         }
         if (hasActiveSession && streamLive && !usingWebRTC) {
           refreshStreamFrame();

@@ -134,9 +134,9 @@ def test_release_car_refunds_unused_time(client):
     release_response = client.post('/release_car', follow_redirects=True)
     assert release_response.status_code == 200
     html = release_response.data.decode('utf-8')
-    match = re.search(r'Remaining time:\s*<span[^>]*>(\d+)s</span>', html)
+    match = re.search(r'id="remaining-time"\s+data-seconds="(\d+)"', html)
     assert match is not None
-    assert int(match.group(1)) > 300
+    assert int(match.group(1)) > 500
 
 
 def test_session_countdown_starts_after_stream_appears(client):
@@ -165,10 +165,20 @@ def test_session_countdown_starts_after_stream_appears(client):
     pre_payload = pre_stream_status.get_json()
     assert pre_payload['active'] is True
     assert pre_payload['billing_started'] is False
-    assert pre_payload['remaining_seconds'] == 300
+    assert pre_payload['remaining_seconds'] == 600
+
+    # Billing should not start until client explicitly confirms stream playback.
+    start_before_stream = client.post('/api/session/start')
+    assert start_before_stream.status_code == 409
 
     frame_response = client.post('/api/video/pipeline/frame', data=b'frame-start', content_type='image/jpeg')
     assert frame_response.status_code == 200
+
+    start_after_stream = client.post('/api/session/start')
+    assert start_after_stream.status_code == 200
+    start_payload = start_after_stream.get_json()
+    assert start_payload['status'] == 'ok'
+    assert start_payload['billing_started'] is True
 
     post_stream_status = client.get('/api/session/status')
     assert post_stream_status.status_code == 200
@@ -201,6 +211,9 @@ def test_stream_loss_refunds_and_allows_new_request(client):
 
     frame_response = client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
     assert frame_response.status_code == 200
+
+    start_response = client.post('/api/session/start')
+    assert start_response.status_code == 200
 
     # Force stream staleness quickly and trigger refresh via a page request.
     client.application.config['STREAM_STALE_SECONDS'] = 0.0
