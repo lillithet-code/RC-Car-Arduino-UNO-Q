@@ -14,17 +14,48 @@ VIDEO_DEVICE = int(os.environ.get('VIDEO_DEVICE', '0'))
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '20'))
 QUALITY = int(os.environ.get('JPEG_QUALITY', '70'))
 UPLOAD_TIMEOUT_SECONDS = float(os.environ.get('UPLOAD_TIMEOUT_SECONDS', '5.0'))
+STREAM_MODE = os.environ.get('STREAM_MODE', 'hardware').strip().lower()
+VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1280'))
+VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
+CAMERA_FOURCC = os.environ.get('CAMERA_FOURCC', 'MJPG').strip().upper()
+CAPTURE_BUFFER_SIZE = int(os.environ.get('CAPTURE_BUFFER_SIZE', '1'))
+
+
+def open_capture(device_index):
+    backend = cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else 0
+    cap = cv2.VideoCapture(device_index, backend)
+    if not cap.isOpened():
+        return cap
+
+    # Ask camera for low-latency V4L2 settings first.
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, max(1, CAPTURE_BUFFER_SIZE))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, FRAME_RATE)
+
+    if STREAM_MODE in {'hardware', 'auto'}:
+        fourcc = cv2.VideoWriter_fourcc(*CAMERA_FOURCC)
+        cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    actual_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+    actual_fourcc_raw = int(cap.get(cv2.CAP_PROP_FOURCC) or 0)
+    actual_fourcc = ''.join(chr((actual_fourcc_raw >> 8 * i) & 0xFF) for i in range(4)).strip() or '????'
+    print(
+        f'capture configured mode={STREAM_MODE} device={device_index} '
+        f'{actual_width}x{actual_height}@{actual_fps:.2f} fourcc={actual_fourcc}'
+    )
+
+    return cap
 
 
 def main():
-    cap = cv2.VideoCapture(VIDEO_DEVICE)
+    cap = open_capture(VIDEO_DEVICE)
     if not cap.isOpened():
         print('Unable to open camera device', file=sys.stderr)
         sys.exit(1)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, FRAME_RATE)
     frame_period = 1.0 / max(FRAME_RATE, 1)
 
     while True:
