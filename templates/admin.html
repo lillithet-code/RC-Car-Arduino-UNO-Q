@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: linear-gradient(135deg, #0f172a, #111827); color: #f8fafc; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+    .card { background: rgba(17,24,39,0.92); padding: 1.25rem; border-radius: 16px; box-shadow: 0 16px 40px rgba(0,0,0,0.25); margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 0.75rem; border-bottom: 1px solid #334155; text-align: left; }
+    th:nth-child(3), td:nth-child(3) { width: 90px; text-align: center; }
+    th:nth-child(4), td:nth-child(4) { width: 280px; }
+    input, select { padding: 0.55rem; border-radius: 8px; border: 1px solid #334155; }
+    button { padding: 0.55rem 0.9rem; border-radius: 8px; border: 0; background: #2563eb; color: white; }
+    .btn-add { background: #16a34a; }
+    .btn-remove { background: #dc2626; }
+    .inline-form { display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center; }
+    .single-row { display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center; }
+    .checkbox-cell { text-align:center; width: 90px; }
+    .checkbox-cell form { display:flex; justify-content:center; align-items:center; margin:0; }
+    .checkbox-cell input[type="checkbox"] { margin:0; transform: scale(1.1); }
+    a { color: #60a5fa; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>Administrator Dashboard</h1>
+      <p>Manage accounts, time balances, and vehicle availability.</p>
+      <a href="{{ url_for('index') }}">Back to dashboard</a>
+    </div>
+
+    <div class="card">
+      <h2>Accounts</h2>
+      <table>
+        <thead>
+          <tr><th>User</th><th>Remaining Time</th><th>Admin</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {% for user in users %}
+          <tr>
+            <td>{{ user.username }}</td>
+            <td>{{ format_seconds(user.balance) }}</td>
+            <td class="checkbox-cell">
+              <form method="post">
+                <input type="hidden" name="user_id" value="{{ user.id }}">
+                <input type="hidden" name="action" value="set_admin">
+                <input type="checkbox" name="is_admin" value="1" {% if user.is_admin %}checked{% endif %} onchange="this.form.submit()">
+              </form>
+            </td>
+            <td>
+              <form method="post" class="single-row">
+                <input type="hidden" name="user_id" value="{{ user.id }}">
+                <input type="hidden" name="action" value="adjust_time">
+                <input type="number" name="seconds" value="300" min="0" style="width:90px;">
+                <button type="submit" name="direction" value="add" class="btn-add">Add</button>
+                <button type="submit" name="direction" value="remove" class="btn-remove">Remove</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Vehicles</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Status</th><th>Location</th></tr>
+        </thead>
+        <tbody>
+          {% for device in devices %}
+          <tr>
+            <td>{{ device.name }}</td>
+            <td>{{ device.status }}</td>
+            <td>{{ device.location }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>

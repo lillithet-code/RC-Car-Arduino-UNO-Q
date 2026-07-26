@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: linear-gradient(135deg, #0f172a, #111827); color: #f8fafc; }
+    .container { max-width: 980px; margin: 0 auto; padding: 2rem; }
+    .card { background: rgba(17,24,39,0.92); padding: 1.35rem; border-radius: 20px; box-shadow: 0 18px 40px rgba(0,0,0,0.25); margin-bottom: 1rem; }
+    .hero { display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    button { padding: 0.7rem 1rem; border-radius: 999px; background: linear-gradient(90deg, #2563eb, #3b82f6); color: white; border: 0; cursor: pointer; }
+    .pill { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: rgba(59,130,246,0.18); color: #bfdbfe; margin-right: 0.5rem; }
+    .success { color: #86efac; }
+    .error { color: #fca5a5; }
+    a { color: #93c5fd; }
+    .action-button { padding: 0.75rem 1.1rem; border-radius: 999px; border: 0; cursor: pointer; color: white; }
+    .action-button.primary { background: linear-gradient(90deg, #2563eb, #3b82f6); }
+    .action-button.danger { background: linear-gradient(90deg, #dc2626, #ef4444); }
+    .top-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
+    .session-layout { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; }
+    .video-panel { flex: 1 1 0; min-width: 320px; }
+    .joystick-panel { width: 260px; display: flex; flex-direction: column; align-items: center; }
+    .stream { width: 100%; max-width: 720px; border-radius: 20px; border: 2px solid #334155; }
+    .joystick { width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle at center, #1e3a8a 0%, #0f172a 70%); position: relative; border: 3px solid #60a5fa; touch-action: none; }
+    .knob { width: 70px; height: 70px; border-radius: 50%; background: linear-gradient(135deg, #fbbf24, #f59e0b); position: absolute; top: 75px; left: 75px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="hero">
+        <div>
+          <h1>Welcome, {{ user.username }}</h1>
+          <div class="pill">Remaining time: {{ remaining_seconds if remaining_seconds is not none else user.balance }}s</div>
+        </div>
+        <div class="top-actions">
+          {% if user.is_admin %}<a href="{{ url_for('admin') }}">Admin panel</a>{% endif %}
+          <a href="{{ url_for('logout') }}">Logout</a>
+        </div>
+      </div>
+      {% if success %}<p class="success">{{ success }}</p>{% endif %}
+      {% if error %}<p class="error">{{ error }}</p>{% endif %}
+      {% if active_session %}
+      <form method="post" action="{{ url_for('release_car') }}" style="margin-top:1rem;">
+        <button type="submit" class="action-button danger">Release RC Car</button>
+      </form>
+      {% else %}
+      <form method="post" action="{{ url_for('request_car') }}" style="margin-top:1rem;">
+        <button type="submit" class="action-button primary">Request RC Car</button>
+      </form>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Current Session</h2>
+      {% if active_session %}
+        <p>Connected to {{ active_session.name }}. Your time is counting down live.</p>
+        <div class="session-layout">
+          <div class="video-panel">
+            <img class="stream" src="{{ url_for('video_feed', mode='stream') }}" alt="Live video stream">
+          </div>
+          <div class="joystick-panel">
+            <div class="joystick" id="joystick">
+              <div class="knob" id="knob"></div>
+            </div>
+            <form method="post" action="{{ url_for('release_car') }}">
+              <button type="submit">Release car</button>
+            </form>
+          </div>
+        </div>
+      {% else %}
+        <p>No active session. Request a vehicle to begin driving.</p>
+      {% endif %}
+    </div>
+  </div>
+  <script>
+    const joystick = document.getElementById('joystick');
+    const knob = document.getElementById('knob');
+    let dragging = false;
+
+    function sendAction(action) {
+      fetch('/api/control', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action })
+      });
+    }
+
+    function updateFromPointer(x, y) {
+      const rect = joystick.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const dx = Math.max(-1, Math.min(1, (x - centerX) / (rect.width / 2)));
+      const dy = Math.max(-1, Math.min(1, (y - centerY) / (rect.height / 2)));
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+      let action = 'stop';
+      if (absX > absY) {
+        action = dx > 0 ? 'right' : 'left';
+      } else if (absY > absX) {
+        action = dy > 0 ? 'back' : 'forward';
+      }
+      knob.style.left = `${75 + dx * 55}px`;
+      knob.style.top = `${75 + dy * 55}px`;
+      sendAction(action);
+    }
+
+    joystick.addEventListener('pointerdown', (event) => {
+      dragging = true;
+      joystick.setPointerCapture(event.pointerId);
+      updateFromPointer(event.clientX, event.clientY);
+    });
+
+    joystick.addEventListener('pointermove', (event) => {
+      if (!dragging) return;
+      updateFromPointer(event.clientX, event.clientY);
+    });
+
+    joystick.addEventListener('pointerup', () => {
+      dragging = false;
+      knob.style.left = '75px';
+      knob.style.top = '75px';
+      sendAction('stop');
+    });
+    joystick.addEventListener('pointercancel', () => {
+      dragging = false;
+      knob.style.left = '75px';
+      knob.style.top = '75px';
+      sendAction('stop');
+    });
+  </script>
+</body>
+</html>
+  </div>
+</body>
+</html>

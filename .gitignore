@@ -1,0 +1,11 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local/editor files
+.vscode/
+
+# Local runtime data
+app.db
+.env

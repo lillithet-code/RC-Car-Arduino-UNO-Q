@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RC Car Streaming Platform</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
+    .hero { max-width: 900px; margin: 0 auto; padding: 4rem 2rem; }
+    .card { background: #111827; padding: 2rem; border-radius: 16px; }
+    a { color: #60a5fa; }
+    .actions a { display: inline-block; margin-right: 1rem; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <div class="card">
+      <h1>RC Car Streaming Platform</h1>
+      <p>Register, log in, claim a vehicle, and control a remote RC car from a browser.</p>
+      <div class="actions">
+        <a href="{{ url_for('register') }}">Create account</a>
+        <a href="{{ url_for('login') }}">Log in</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
