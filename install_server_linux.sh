@@ -47,6 +47,10 @@ if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
   fi
 fi
 
+if command -v sudo >/dev/null 2>&1; then
+  sudo chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
+fi
+
 if [[ ! -f "$APP_DIR/requirements.txt" ]]; then
   echo "Error: requirements.txt not found in APP_DIR=$APP_DIR" >&2
   echo "Set SOURCE_DIR to a valid project checkout before running installer." >&2
