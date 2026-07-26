@@ -177,6 +177,81 @@ def test_session_countdown_starts_after_stream_appears(client):
     assert post_payload['billing_started'] is True
 
 
+def test_stream_loss_refunds_and_allows_new_request(client):
+    client.post('/register', data={
+        'username': 'gary',
+        'password': 'secret123',
+        'email': 'gary@example.com'
+    })
+    client.post('/login', data={
+        'username': 'gary',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-gary',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+
+    first_request = client.post('/request_car')
+    assert first_request.status_code == 200
+    assert b'Control session started' in first_request.data
+
+    frame_response = client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
+    assert frame_response.status_code == 200
+
+    # Force stream staleness quickly and trigger refresh via a page request.
+    client.application.config['STREAM_STALE_SECONDS'] = 0.0
+    dashboard_response = client.get('/')
+    assert dashboard_response.status_code == 200
+
+    # Register an additional car so a new session can be allocated.
+    second_register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-gary-2',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert second_register_response.status_code == 200
+
+    second_request = client.post('/request_car')
+    assert second_request.status_code == 200
+    assert b'Control session started' in second_request.data
+
+
+def test_request_car_allows_partial_session_when_balance_under_default(client):
+    client.post('/register', data={
+        'username': 'helen',
+        'password': 'secret123',
+        'email': 'helen@example.com'
+    })
+    client.post('/login', data={
+        'username': 'helen',
+        'password': 'secret123'
+    })
+
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-helen',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+
+    # Reduce user balance below default session duration.
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE users SET balance = 120 WHERE username = 'helen'")
+        conn.commit()
+        conn.close()
+
+    response = client.post('/request_car')
+    assert response.status_code == 200
+    assert b'Control session started' in response.data
+
+
 def test_stream_chunk_endpoint_and_video_feed(client):
     response = client.post('/api/stream/chunk', data=b'chunk-one', content_type='image/jpeg')
     assert response.status_code == 200

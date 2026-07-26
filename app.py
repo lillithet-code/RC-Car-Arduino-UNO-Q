@@ -78,13 +78,14 @@ def create_app(test_config=None):
             ensure_column('users', 'is_admin', 'INTEGER DEFAULT 0')
             ensure_column('users', 'balance', 'INTEGER DEFAULT 0')
             ensure_column('sessions', 'billing_started_at', 'TEXT')
+            ensure_column('sessions', 'allocated_seconds', "INTEGER DEFAULT 300")
             db.commit()
 
     def refresh_sessions():
         db = get_db()
         now = datetime.now(timezone.utc)
         active_rows = db.execute(
-            "SELECT id, user_id, device_id, billing_started_at FROM sessions WHERE status = 'active'"
+            "SELECT id, user_id, device_id, billing_started_at, allocated_seconds FROM sessions WHERE status = 'active'"
         ).fetchall()
         changed = False
 
@@ -93,8 +94,9 @@ def create_app(test_config=None):
             if billing_started_at is None:
                 continue
 
+            allocated_seconds = max(0, int(row['allocated_seconds'] or app.config['SESSION_DURATION_SECONDS']))
             elapsed_seconds = max(0, int((now - billing_started_at).total_seconds()))
-            remaining_seconds = max(0, app.config['SESSION_DURATION_SECONDS'] - elapsed_seconds)
+            remaining_seconds = max(0, allocated_seconds - elapsed_seconds)
 
             if remaining_seconds <= 0:
                 db.execute("UPDATE sessions SET status = 'expired' WHERE id = ?", (row['id'],))
@@ -127,7 +129,7 @@ def create_app(test_config=None):
     def get_active_session(user_id):
         db = get_db()
         return db.execute('''
-            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, d.name
+            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, s.allocated_seconds, d.name
             FROM sessions s
             JOIN devices d ON d.id = s.device_id
             WHERE s.user_id = ? AND s.status = 'active'
@@ -138,12 +140,13 @@ def create_app(test_config=None):
         if active_session is None:
             active_session = get_active_session(user_id)
         if active_session is not None:
+            allocated_seconds = max(0, int(active_session['allocated_seconds'] or app.config['SESSION_DURATION_SECONDS']))
             billing_started_at = parse_timestamp(active_session['billing_started_at'])
             if billing_started_at is None:
-                return app.config['SESSION_DURATION_SECONDS']
+                return allocated_seconds
             now = datetime.now(timezone.utc)
             elapsed_seconds = max(0, int((now - billing_started_at).total_seconds()))
-            return max(0, app.config['SESSION_DURATION_SECONDS'] - elapsed_seconds)
+            return max(0, allocated_seconds - elapsed_seconds)
         user = get_user_view(user_id)
         return max(0, int(user['balance'])) if user else 0
 
@@ -274,7 +277,7 @@ def create_app(test_config=None):
 
         db = get_db()
         user = get_user_view(session['user_id'])
-        duration_seconds = app.config['SESSION_DURATION_SECONDS']
+        duration_seconds = min(app.config['SESSION_DURATION_SECONDS'], max(0, int(user['balance'])))
         active_session = get_active_session(session['user_id'])
         remaining_seconds = get_remaining_seconds(session['user_id'], active_session)
         if active_session:
@@ -285,7 +288,7 @@ def create_app(test_config=None):
                 active_session=active_session,
                 remaining_seconds=remaining_seconds,
             )
-        if user['balance'] < duration_seconds:
+        if duration_seconds <= 0:
             return render_template('dashboard.html', user=user, error='Not enough credit', active_session=active_session, remaining_seconds=remaining_seconds)
 
         device = db.execute('SELECT id, name FROM devices WHERE status = ? ORDER BY id LIMIT 1', ('available',)).fetchone()
@@ -294,8 +297,8 @@ def create_app(test_config=None):
 
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)).strftime('%Y-%m-%d %H:%M:%S')
         db.execute(
-            'INSERT INTO sessions (user_id, device_id, expires_at, billing_started_at) VALUES (?, ?, ?, ?)',
-            (user['id'], device['id'], expires_at, None)
+            'INSERT INTO sessions (user_id, device_id, expires_at, billing_started_at, allocated_seconds) VALUES (?, ?, ?, ?, ?)',
+            (user['id'], device['id'], expires_at, None, duration_seconds)
         )
         db.execute('UPDATE devices SET status = ? WHERE id = ?', ('busy', device['id']))
         db.execute('UPDATE users SET balance = balance - ? WHERE id = ?', (duration_seconds, user['id']))
