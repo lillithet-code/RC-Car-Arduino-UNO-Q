@@ -870,6 +870,8 @@ def create_app(test_config=None):
             mark_board_activity_for_device('h264_chunk', board_name)
 
         decoded_any = False
+        decoded_frames = 0
+        latest_decoded_frame = None
         packets = []
         try:
             parsed_packets = h264_decoder.parse(data)
@@ -893,10 +895,13 @@ def create_app(test_config=None):
             except Exception:
                 continue
             for frame in frames:
-                frame_bgr = frame.to_ndarray(format='bgr24')
-                ok, encoded = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-                if not ok:
-                    continue
+                decoded_frames += 1
+                latest_decoded_frame = frame
+
+        if latest_decoded_frame is not None:
+            frame_bgr = latest_decoded_frame.to_ndarray(format='bgr24')
+            ok, encoded = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            if ok:
                 latest_stream_chunk = encoded.tobytes()
                 if stream_queue.full():
                     try:
@@ -907,14 +912,27 @@ def create_app(test_config=None):
                 pipeline_frame_counter += 1
                 decoded_any = True
 
+        ingest_ms = (time.monotonic() - ingest_started) * 1000.0
+        if ingest_ms >= 120.0:
+            app.logger.warning(
+                'h264 ingest slow decoded=%s decoded_frames=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
+                decoded_any,
+                decoded_frames,
+                len(data),
+                stream_queue.qsize(),
+                ingest_ms,
+                h264_parse_errors,
+            )
+
         if app.config['STREAM_PROFILE'] and (pipeline_frame_counter <= 3 or pipeline_frame_counter % 30 == 0):
             app.logger.info(
-                'stream profile ingest=h264 decoded=%s frame_id=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
+                'stream profile ingest=h264 decoded=%s decoded_frames=%s frame_id=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
                 decoded_any,
+                decoded_frames,
                 pipeline_frame_counter,
                 len(data),
                 stream_queue.qsize(),
-                (time.monotonic() - ingest_started) * 1000.0,
+                ingest_ms,
                 h264_parse_errors,
             )
 

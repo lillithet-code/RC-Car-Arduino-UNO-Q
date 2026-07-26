@@ -52,6 +52,8 @@ H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
 H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
 H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
+H264_UPLOAD_RETRY_ONCE = os.environ.get('H264_UPLOAD_RETRY_ONCE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+H264_UPLOAD_PROFILE_MS = max(0.0, float(os.environ.get('H264_UPLOAD_PROFILE_MS', '120.0')))
 STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
 STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
@@ -327,6 +329,36 @@ def post_bytes(url, payload, content_type):
         _UPLOAD_CONNECTION = None
         _UPLOAD_CONNECTION_KEY = None
         raise
+
+
+def post_h264_with_retry(payload):
+    started = time.monotonic()
+    attempts = 0
+    last_error = None
+    max_attempts = 2 if H264_UPLOAD_RETRY_ONCE else 1
+
+    while attempts < max_attempts:
+        attempts += 1
+        try:
+            post_bytes(STREAM_H264_ENDPOINT, payload, 'video/h264')
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            if H264_UPLOAD_PROFILE_MS > 0 and elapsed_ms >= H264_UPLOAD_PROFILE_MS:
+                print(
+                    f'h264 upload slow bytes={len(payload)} attempts={attempts} elapsed_ms={elapsed_ms:.1f}',
+                    file=sys.stderr,
+                )
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempts < max_attempts:
+                print(
+                    f'h264 upload retrying after transient failure attempt={attempts} error={exc}',
+                    file=sys.stderr,
+                )
+
+    if last_error is not None:
+        print(f'H264 upload failed: {last_error}', file=sys.stderr)
+    return False
 
 
 def log_profile_summary(*, path, event_count, total_elapsed, read_elapsed=None, post_elapsed=None, encode_elapsed=None, upload_bytes=None, extra=None):
@@ -613,8 +645,7 @@ def main():
                 if h264_upload_buffer and (time.monotonic() - h264_last_upload) >= h264_max_delay:
                     flush_started = time.monotonic()
                     flush_size = len(h264_upload_buffer)
-                    try:
-                        post_bytes(STREAM_H264_ENDPOINT, bytes(h264_upload_buffer), 'video/h264')
+                    if post_h264_with_retry(bytes(h264_upload_buffer)):
                         h264_upload_buffer.clear()
                         h264_last_upload = time.monotonic()
                         h264_failures = 0
@@ -626,8 +657,6 @@ def main():
                                 path='h264_hw',
                                 message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
                             )
-                    except Exception as exc:
-                        print(f'H264 upload failed: {exc}', file=sys.stderr)
                     if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
                         profile_total_elapsed = time.monotonic() - profile_window_started
                         log_profile_summary(
@@ -664,9 +693,8 @@ def main():
                 continue
 
             post_started = time.monotonic()
-            try:
-                flush_size = len(h264_upload_buffer)
-                post_bytes(STREAM_H264_ENDPOINT, bytes(h264_upload_buffer), 'video/h264')
+            flush_size = len(h264_upload_buffer)
+            if post_h264_with_retry(bytes(h264_upload_buffer)):
                 h264_upload_buffer.clear()
                 h264_last_upload = time.monotonic()
                 h264_failures = 0
@@ -678,9 +706,6 @@ def main():
                         path='h264_hw',
                         message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
                     )
-            except Exception as exc:
-                print(f'H264 upload failed: {exc}', file=sys.stderr)
-
             if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
                 profile_total_elapsed = time.monotonic() - profile_window_started
                 log_profile_summary(
