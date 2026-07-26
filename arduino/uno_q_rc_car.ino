@@ -17,6 +17,13 @@
 #include <Servo.h>
 #include "car_config.h"
 
+#if __has_include("Arduino_RouterBridge.h")
+#include "Arduino_RouterBridge.h"
+#define HAS_ROUTER_BRIDGE 1
+#else
+#define HAS_ROUTER_BRIDGE 0
+#endif
+
 Servo steeringServo;
 
 const int motorPWM = MOTOR_PWM_PIN;
@@ -46,6 +53,19 @@ void setup() {
   Serial.print("Car profile: ");
   Serial.println(CAR_NAME);
   Serial.println("Camera stream enabled");
+
+#if HAS_ROUTER_BRIDGE
+  Bridge.begin();
+  Bridge.provide_safe("car_forward", rpc_forward);
+  Bridge.provide_safe("car_back", rpc_back);
+  Bridge.provide_safe("car_left", rpc_left);
+  Bridge.provide_safe("car_right", rpc_right);
+  Bridge.provide_safe("car_stop", rpc_stop);
+  Bridge.provide_safe("car_lights_on", rpc_lights_on);
+  Bridge.provide_safe("car_lights_off", rpc_lights_off);
+  Serial.println("Router Bridge command handlers ready");
+#endif
+
   stopCar();
 }
 
@@ -136,3 +156,35 @@ void toggleHeadlights() {
     digitalWrite(lightPins[i], headlightsOn ? HIGH : LOW);
   }
 }
+
+#if HAS_ROUTER_BRIDGE
+void rpc_forward() {
+  driveForward();
+}
+
+void rpc_back() {
+  driveBackward();
+}
+
+void rpc_left() {
+  turnLeft();
+}
+
+void rpc_right() {
+  turnRight();
+}
+
+void rpc_stop() {
+  stopCar();
+}
+
+void rpc_lights_on() {
+  headlightsOn = false;
+  toggleHeadlights();
+}
+
+void rpc_lights_off() {
+  headlightsOn = true;
+  toggleHeadlights();
+}
+#endif

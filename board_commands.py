@@ -11,6 +11,11 @@ try:
 except ImportError:  # pragma: no cover - exercised when pyserial is missing
     serial = None
 
+try:
+    import msgpack
+except ImportError:  # pragma: no cover - exercised when msgpack is missing
+    msgpack = None
+
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
 BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
 SERIAL_PORT = os.environ.get('SERIAL_PORT', '/dev/ttyACM0')
@@ -18,6 +23,7 @@ SERIAL_BAUD_RATE = int(os.environ.get('SERIAL_BAUD_RATE', '9600'))
 SERIAL_RETRY_SECONDS = float(os.environ.get('SERIAL_RETRY_SECONDS', '1.0'))
 SERIAL_EXCLUSIVE = os.environ.get('SERIAL_EXCLUSIVE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 COMMAND_BRIDGE = os.environ.get('COMMAND_BRIDGE', '').strip()
+ROUTER_SOCKET_PATH = os.environ.get('ROUTER_SOCKET_PATH', '/var/run/arduino-router.sock').strip()
 BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
 BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
 
@@ -29,6 +35,16 @@ COMMAND_MAP = {
     'stop': 'S',
     'lights_on': 'H',
     'lights_off': 'H',
+}
+
+RPC_METHOD_MAP = {
+    'forward': ('car_forward', []),
+    'back': ('car_back', []),
+    'left': ('car_left', []),
+    'right': ('car_right', []),
+    'stop': ('car_stop', []),
+    'lights_on': ('car_lights_on', []),
+    'lights_off': ('car_lights_off', []),
 }
 
 
@@ -57,6 +73,13 @@ def resolve_command_target():
         return {'transport': 'disabled', 'target': value}
 
     parsed = urllib_parse.urlparse(value)
+    if value in {'router', 'unoq_rpc'}:
+        return {'transport': 'rpc', 'path': ROUTER_SOCKET_PATH, 'target': value}
+    if parsed.scheme == 'rpc':
+        socket_path = parsed.path or parsed.netloc
+        if not socket_path:
+            raise ValueError(f'invalid rpc bridge target: {value}')
+        return {'transport': 'rpc', 'path': socket_path, 'target': value}
     if parsed.scheme == 'tcp':
         if not parsed.hostname or not parsed.port:
             raise ValueError(f'invalid tcp bridge target: {value}')
@@ -104,6 +127,20 @@ def send_command(action, port=SERIAL_PORT, baud_rate=SERIAL_BAUD_RATE):
             connection.sendall(payload)
         return True
 
+    if transport == 'rpc':
+        method = RPC_METHOD_MAP.get(action.lower().strip())
+        if not method:
+            return False
+        if msgpack is None:
+            raise RuntimeError('msgpack is required for rpc command transport')
+        notify = [2, method[0], method[1]]
+        payload = msgpack.packb(notify)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1.5)
+            connection.connect(TARGET_CONFIG['path'])
+            connection.sendall(payload)
+        return True
+
     if serial is None:
         raise RuntimeError('pyserial is required to send commands to the Arduino')
 
@@ -129,6 +166,14 @@ def open_command_connection(port=SERIAL_PORT, baud_rate=SERIAL_BAUD_RATE):
         return connection
 
     if transport == 'unix':
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(2.0)
+        connection.connect(TARGET_CONFIG['path'])
+        return connection
+
+    if transport == 'rpc':
+        if msgpack is None:
+            raise RuntimeError('msgpack is required for rpc command transport')
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.settimeout(2.0)
         connection.connect(TARGET_CONFIG['path'])
@@ -173,6 +218,16 @@ def send_command_on_connection(action, connection):
         return True
     if transport in {'tcp', 'unix'}:
         connection.sendall(payload)
+        return True
+
+    if transport == 'rpc':
+        method = RPC_METHOD_MAP.get(action.lower().strip())
+        if not method:
+            return False
+        if msgpack is None:
+            raise RuntimeError('msgpack is required for rpc command transport')
+        notify = [2, method[0], method[1]]
+        connection.sendall(msgpack.packb(notify))
         return True
 
     connection.write(payload)
