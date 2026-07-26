@@ -88,6 +88,7 @@
     let activeStreamId = null;
     let billingStarted = false;
     let startRequestInFlight = false;
+    let fallbackFrameRendered = false;
 
     function formatSeconds(totalSeconds) {
       const safe = Math.max(0, Number(totalSeconds) || 0);
@@ -122,8 +123,15 @@
       }
 
       // Start billing only when playback is actually running.
-      if (usingWebRTC && (!streamVideo || streamVideo.readyState < 2 || streamVideo.paused)) {
-        return;
+      if (usingWebRTC) {
+        if (!streamVideo || streamVideo.readyState < 2 || streamVideo.paused || streamVideo.videoWidth <= 0) {
+          return;
+        }
+      } else {
+        const fallbackVisible = streamImage && streamImage.style.display !== 'none';
+        if (!fallbackVisible || !fallbackFrameRendered || (streamImage.naturalWidth || 0) <= 0) {
+          return;
+        }
       }
 
       startRequestInFlight = true;
@@ -151,6 +159,7 @@
       if (!streamImage) {
         return;
       }
+      fallbackFrameRendered = false;
       streamImage.src = `${streamSingleBaseUrl}&t=${Date.now()}`;
     }
 
@@ -301,6 +310,11 @@
     }
 
     if (streamImage || remainingTime) {
+      if (streamImage) {
+        streamImage.addEventListener('load', () => {
+          fallbackFrameRendered = true;
+        });
+      }
       setupWebRTC();
       refreshStreamFrame();
       pollSessionStatus();

@@ -34,6 +34,7 @@ def create_app(test_config=None):
     app.config['BOARD_TOKEN'] = os.environ.get('BOARD_TOKEN', 'dev-board-token')
     app.config['SESSION_DURATION_SECONDS'] = int(os.environ.get('SESSION_DURATION_SECONDS', '300'))
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '2.0'))
+    app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
 
     if test_config:
         app.config.update(test_config)
@@ -469,7 +470,7 @@ def create_app(test_config=None):
                     await pc.close()
                     peer_connections.discard(pc)
 
-            track = StreamVideoTrack(lambda: latest_stream_chunk, fps=20)
+            track = StreamVideoTrack(lambda: latest_stream_chunk, fps=app.config['WEBRTC_TRACK_FPS'])
             pc.addTrack(track)
 
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=offer_type))
