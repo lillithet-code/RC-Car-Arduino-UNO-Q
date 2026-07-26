@@ -34,6 +34,14 @@ H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))) )
 H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '8192'))
 H264_INPUT_FORMATS = os.environ.get('H264_INPUT_FORMATS', '').strip()
 H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
+H264_ENCODERS = os.environ.get('H264_ENCODERS', 'h264_v4l2m2m,h264_omx').strip()
+
+
+def get_h264_encoders():
+    values = [item.strip() for item in H264_ENCODERS.split(',') if item.strip()]
+    if not values:
+        return ['h264_v4l2m2m']
+    return values
 
 
 def get_h264_input_formats():
@@ -104,7 +112,7 @@ def post_bytes(url, payload, content_type):
     urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0))
 
 
-def start_h264_ffmpeg(input_format):
+def start_h264_ffmpeg(input_format, encoder_name):
     encoder_mode = H264_ENCODER_MODE
     if encoder_mode not in {'auto', 'copy', 'transcode'}:
         encoder_mode = 'auto'
@@ -133,7 +141,7 @@ def start_h264_ffmpeg(input_format):
     else:
         command.extend([
             '-vf', 'format=nv12',
-            '-c:v', 'h264_v4l2m2m',
+            '-c:v', encoder_name,
             '-pix_fmt', 'nv12',
             '-g', str(max(1, H264_GOP)),
             '-bf', '0',
@@ -145,7 +153,10 @@ def start_h264_ffmpeg(input_format):
         ])
 
     mode_label = 'copy' if use_copy else 'transcode'
-    print(f'starting h264 pipeline mode={mode_label} input_format={input_format}: {" ".join(command)}')
+    print(
+        f'starting h264 pipeline mode={mode_label} encoder={encoder_name} '
+        f'input_format={input_format}: {" ".join(command)}'
+    )
     return subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -161,6 +172,8 @@ def main():
     last_enabled = None
     h264_input_formats = get_h264_input_formats()
     h264_input_index = 0
+    h264_encoders = get_h264_encoders()
+    h264_encoder_index = 0
     selected_pipeline = STREAM_PIPELINE
     if selected_pipeline == 'auto':
         selected_pipeline = 'h264_hw'
@@ -170,7 +183,8 @@ def main():
     print(
         f'selected stream pipeline: {selected_pipeline} '
         f'h264_input_formats={"|".join(h264_input_formats)} '
-        f'h264_encoder_mode={H264_ENCODER_MODE}'
+        f'h264_encoder_mode={H264_ENCODER_MODE} '
+        f'h264_encoders={"|".join(h264_encoders)}'
     )
     h264_failures = 0
 
@@ -198,7 +212,8 @@ def main():
             if h264_process is None:
                 try:
                     active_input = h264_input_formats[h264_input_index]
-                    h264_process = start_h264_ffmpeg(active_input)
+                    active_encoder = h264_encoders[h264_encoder_index]
+                    h264_process = start_h264_ffmpeg(active_input, active_encoder)
                 except Exception as exc:
                     if strict_hardware_only:
                         print(f'h264 pipeline start failed in strict mode; retrying: {exc}', file=sys.stderr)
@@ -228,6 +243,12 @@ def main():
                     h264_input_index = (h264_input_index + 1) % len(h264_input_formats)
                     print(
                         f'rotating h264 input format to {h264_input_formats[h264_input_index]}',
+                        file=sys.stderr,
+                    )
+                if h264_encoders:
+                    h264_encoder_index = (h264_encoder_index + 1) % len(h264_encoders)
+                    print(
+                        f'rotating h264 encoder to {h264_encoders[h264_encoder_index]}',
                         file=sys.stderr,
                     )
                 if exit_code == -11:
