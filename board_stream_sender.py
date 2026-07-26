@@ -131,6 +131,7 @@ def main():
     if selected_pipeline not in {'h264_hw', 'mjpg'}:
         selected_pipeline = 'mjpg'
     print(f'selected stream pipeline: {selected_pipeline}')
+    h264_failures = 0
 
     while True:
         stream_enabled = fetch_stream_enabled()
@@ -156,14 +157,30 @@ def main():
             if h264_process is None:
                 try:
                     h264_process = start_h264_ffmpeg()
+                    h264_failures = 0
                 except Exception as exc:
                     print(f'h264 pipeline start failed, fallback to mjpg: {exc}', file=sys.stderr)
                     selected_pipeline = 'mjpg'
                     continue
 
             if h264_process.poll() is not None:
-                print('h264 encoder exited; restarting', file=sys.stderr)
+                h264_failures += 1
+                stderr_output = ''
+                try:
+                    if h264_process.stderr is not None:
+                        stderr_output = h264_process.stderr.read().decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    stderr_output = ''
+
+                if stderr_output:
+                    print(f'h264 encoder exited; stderr: {stderr_output}', file=sys.stderr)
+                else:
+                    print('h264 encoder exited; restarting', file=sys.stderr)
+
                 h264_process = None
+                if h264_failures >= 5:
+                    print('h264 encoder repeatedly failed; falling back to mjpg pipeline', file=sys.stderr)
+                    selected_pipeline = 'mjpg'
                 time.sleep(0.2)
                 continue
 
