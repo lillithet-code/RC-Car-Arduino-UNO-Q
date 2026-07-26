@@ -39,6 +39,7 @@ H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536')
 H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '80'))
 STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
+STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
 
 
 def get_h264_encoders():
@@ -103,6 +104,13 @@ def fetch_stream_enabled():
         return False
 
 
+def fetch_stream_enabled_profiled(poll_count):
+    enabled = fetch_stream_enabled()
+    if STREAM_PROFILE and (poll_count <= 3 or poll_count % STREAM_PROFILE_HEARTBEAT_POLLS == 0):
+        print(f'stream profile gate poll={poll_count} enabled={enabled}')
+    return enabled
+
+
 def post_bytes(url, payload, content_type):
     req = urllib_request.Request(
         url,
@@ -133,6 +141,11 @@ def log_profile_summary(*, path, event_count, total_elapsed, read_elapsed=None, 
     if extra:
         parts.append(extra)
     print(' '.join(parts))
+
+
+def log_profile_event(*, path, message):
+    if STREAM_PROFILE:
+        print(f'stream profile path={path} {message}')
 
 
 def start_h264_ffmpeg(input_format, encoder_name):
@@ -217,14 +230,17 @@ def main():
     )
     if STREAM_PROFILE:
         print(f'stream profiling enabled every={STREAM_PROFILE_EVERY}')
+        print(f'stream profiling heartbeat polls={STREAM_PROFILE_HEARTBEAT_POLLS}')
     h264_failures = 0
     h264_upload_buffer = bytearray()
     h264_last_upload = time.monotonic()
     h264_batch_bytes = max(1024, H264_UPLOAD_BATCH_BYTES)
     h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
+    poll_count = 0
 
     while True:
-        stream_enabled = fetch_stream_enabled()
+        poll_count += 1
+        stream_enabled = fetch_stream_enabled_profiled(poll_count)
 
         if stream_enabled != last_enabled:
             state_text = 'enabled' if stream_enabled else 'disabled'
@@ -242,6 +258,8 @@ def main():
                 print('h264 encoder stopped while idle')
             if h264_upload_buffer:
                 h264_upload_buffer.clear()
+            if STREAM_PROFILE and (poll_count <= 3 or poll_count % STREAM_PROFILE_HEARTBEAT_POLLS == 0):
+                log_profile_event(path=selected_pipeline, message='idle waiting_for_session')
             time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
             continue
 
@@ -319,9 +337,13 @@ def main():
                             profile_post_elapsed += time.monotonic() - flush_started
                             profile_upload_bytes += flush_size
                             profile_event_count += 1
+                            log_profile_event(
+                                path='h264_hw',
+                                message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
+                            )
                     except Exception as exc:
                         print(f'H264 upload failed: {exc}', file=sys.stderr)
-                    if STREAM_PROFILE and profile_event_count % STREAM_PROFILE_EVERY == 0:
+                    if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
                         profile_total_elapsed = time.monotonic() - profile_window_started
                         log_profile_summary(
                             path='h264_hw',
@@ -365,10 +387,14 @@ def main():
                     profile_post_elapsed += time.monotonic() - post_started
                     profile_upload_bytes += flush_size
                     profile_event_count += 1
+                    log_profile_event(
+                        path='h264_hw',
+                        message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
+                    )
             except Exception as exc:
                 print(f'H264 upload failed: {exc}', file=sys.stderr)
 
-            if STREAM_PROFILE and profile_event_count % STREAM_PROFILE_EVERY == 0:
+            if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
                 profile_total_elapsed = time.monotonic() - profile_window_started
                 log_profile_summary(
                     path='h264_hw',
@@ -415,7 +441,11 @@ def main():
             profile_encode_elapsed += encode_elapsed
             profile_post_elapsed += time.monotonic() - post_started
             profile_upload_bytes += len(payload)
-            if profile_event_count % STREAM_PROFILE_EVERY == 0:
+            log_profile_event(
+                path='mjpg',
+                message=f'frame bytes={len(payload)} events={profile_event_count} encode_ms={encode_elapsed * 1000:.1f}',
+            )
+            if profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0:
                 profile_total_elapsed = time.monotonic() - profile_window_started
                 log_profile_summary(
                     path='mjpg',
