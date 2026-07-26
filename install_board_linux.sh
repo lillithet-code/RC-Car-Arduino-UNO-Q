@@ -34,7 +34,7 @@ H264_UPLOAD_BATCH_BYTES="${H264_UPLOAD_BATCH_BYTES:-16384}"
 H264_UPLOAD_MAX_DELAY_MS="${H264_UPLOAD_MAX_DELAY_MS:-30}"
 STREAM_PROFILE="${STREAM_PROFILE:-0}"
 STREAM_PROFILE_EVERY="${STREAM_PROFILE_EVERY:-30}"
-VIDEO_DEVICE="${VIDEO_DEVICE:-0}"
+VIDEO_DEVICE="${VIDEO_DEVICE:-auto}"
 
 if [[ -z "$COMMAND_BRIDGE" && -S "$ROUTER_SOCKET_PATH" ]]; then
   COMMAND_BRIDGE="rpc://$ROUTER_SOCKET_PATH"
@@ -109,12 +109,18 @@ if [[ "$VIDEO_DEVICE" =~ ^/dev/video([0-9]+)$ ]]; then
   VIDEO_DEVICE="${BASH_REMATCH[1]}"
 fi
 
-if [[ "$VIDEO_DEVICE" == "0" || "$VIDEO_DEVICE" == "auto" ]]; then
+if [[ "$VIDEO_DEVICE" == "0" ]]; then
   if DETECTED_VIDEO_DEVICE="$(autodetect_first_working_video_device)"; then
     VIDEO_DEVICE="$DETECTED_VIDEO_DEVICE"
     echo "Auto-detected working video device index: $VIDEO_DEVICE"
   else
     echo "Warning: unable to auto-detect a working video device. Using VIDEO_DEVICE=$VIDEO_DEVICE"
+  fi
+elif [[ "$VIDEO_DEVICE" == "auto" ]]; then
+  if DETECTED_VIDEO_DEVICE="$(autodetect_first_working_video_device)"; then
+    echo "Auto mode enabled; current detected camera index: $DETECTED_VIDEO_DEVICE"
+  else
+    echo "Warning: unable to auto-detect a working video device right now. VIDEO_DEVICE=auto will keep retrying at runtime."
   fi
 fi
 

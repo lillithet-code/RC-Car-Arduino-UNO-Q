@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import json
 import http.client
+import glob
 import os
+import re
 import select
 import subprocess
 import sys
@@ -24,7 +26,8 @@ STREAM_H264_ENDPOINT = f'{SERVER_BASE_URL}/api/video/h264/chunk'
 STREAM_STATUS_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/status'
 BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
 BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
-VIDEO_DEVICE = int(os.environ.get('VIDEO_DEVICE', '0'))
+VIDEO_DEVICE_SETTING = os.environ.get('VIDEO_DEVICE', 'auto').strip().lower()
+VIDEO_DEVICE_AUTO_RECOVER = os.environ.get('VIDEO_DEVICE_AUTO_RECOVER', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '25'))
 QUALITY = int(os.environ.get('JPEG_QUALITY', '70'))
 UPLOAD_TIMEOUT_SECONDS = float(os.environ.get('UPLOAD_TIMEOUT_SECONDS', '5.0'))
@@ -51,6 +54,64 @@ STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
 STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
 _UPLOAD_CONNECTION = None
 _UPLOAD_CONNECTION_KEY = None
+
+
+def parse_video_device_setting(value):
+    normalized = (value or '').strip().lower()
+    if not normalized or normalized == 'auto':
+        return None, True
+
+    path_match = re.match(r'^/dev/video(\d+)$', normalized)
+    if path_match:
+        return int(path_match.group(1)), False
+
+    try:
+        return int(normalized), False
+    except ValueError:
+        return None, True
+
+
+def list_video_device_indices():
+    paths = sorted(glob.glob('/dev/video*'))
+    indices = []
+    for path in paths:
+        match = re.match(r'^/dev/video(\d+)$', path)
+        if not match:
+            continue
+        indices.append(int(match.group(1)))
+    return indices
+
+
+def probe_video_device(device_index):
+    backend = cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else 0
+    cap = cv2.VideoCapture(device_index, backend)
+    if not cap.isOpened():
+        cap.release()
+        return False
+
+    ok = False
+    for _ in range(12):
+        ret, _ = cap.read()
+        if ret:
+            ok = True
+            break
+        time.sleep(0.05)
+
+    cap.release()
+    return ok
+
+
+def resolve_working_video_device(preferred_index=None):
+    if preferred_index is not None and probe_video_device(preferred_index):
+        return preferred_index
+
+    for index in list_video_device_indices():
+        if preferred_index is not None and index == preferred_index:
+            continue
+        if probe_video_device(index):
+            return index
+
+    return preferred_index
 
 
 def get_h264_encoders():
@@ -202,7 +263,7 @@ def log_profile_event(*, path, message):
         print(f'stream profile path={path} {message}')
 
 
-def start_h264_ffmpeg(input_format, encoder_name):
+def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
     encoder_mode = H264_ENCODER_MODE
     if encoder_mode not in {'auto', 'copy', 'transcode'}:
         encoder_mode = 'auto'
@@ -218,7 +279,7 @@ def start_h264_ffmpeg(input_format, encoder_name):
         '-input_format', input_format,
         '-video_size', f'{VIDEO_WIDTH}x{VIDEO_HEIGHT}',
         '-framerate', str(FRAME_RATE),
-        '-i', f'/dev/video{VIDEO_DEVICE}',
+        '-i', f'/dev/video{video_device_index}',
         '-an',
     ]
 
@@ -276,6 +337,14 @@ def main():
     if selected_pipeline not in {'h264_hw', 'h264_hw_strict', 'mjpg'}:
         selected_pipeline = 'mjpg'
     strict_hardware_only = selected_pipeline == 'h264_hw_strict'
+    preferred_video_device, auto_video_select = parse_video_device_setting(VIDEO_DEVICE_SETTING)
+    active_video_device = resolve_working_video_device(preferred_video_device)
+    if active_video_device is None:
+        active_video_device = 0
+    print(
+        f'video device strategy: setting={VIDEO_DEVICE_SETTING} auto_select={auto_video_select} '
+        f'auto_recover={VIDEO_DEVICE_AUTO_RECOVER} active_device={active_video_device}'
+    )
     print(
         f'selected stream pipeline: {selected_pipeline} '
         f'h264_input_formats={"|".join(h264_input_formats)} '
@@ -322,9 +391,14 @@ def main():
         if selected_pipeline in {'h264_hw', 'h264_hw_strict'}:
             if h264_process is None:
                 try:
+                    if auto_video_select or VIDEO_DEVICE_AUTO_RECOVER:
+                        detected_device = resolve_working_video_device(active_video_device)
+                        if detected_device != active_video_device:
+                            print(f'switching video device from {active_video_device} to {detected_device}')
+                            active_video_device = detected_device
                     active_input = h264_input_formats[h264_input_index]
                     active_encoder = h264_encoders[h264_encoder_index]
-                    h264_process = start_h264_ffmpeg(active_input, active_encoder)
+                    h264_process = start_h264_ffmpeg(active_input, active_encoder, active_video_device)
                 except Exception as exc:
                     if strict_hardware_only:
                         print(f'h264 pipeline start failed in strict mode; retrying: {exc}', file=sys.stderr)
@@ -347,6 +421,16 @@ def main():
                     print(f'h264 encoder exited; stderr: {stderr_output}', file=sys.stderr)
                 else:
                     print('h264 encoder exited; restarting', file=sys.stderr)
+
+                normalized_error = stderr_output.lower()
+                if VIDEO_DEVICE_AUTO_RECOVER and any(
+                    marker in normalized_error
+                    for marker in ('not a video capture device', 'no such device', 'error opening input')
+                ):
+                    recovered_device = resolve_working_video_device(preferred_video_device)
+                    if recovered_device != active_video_device:
+                        print(f'camera node changed; switching video device from {active_video_device} to {recovered_device}', file=sys.stderr)
+                        active_video_device = recovered_device
 
                 h264_process = None
                 if h264_upload_buffer:
@@ -465,9 +549,15 @@ def main():
             continue
 
         if cap is None:
-            cap = open_capture(VIDEO_DEVICE)
+            if auto_video_select or VIDEO_DEVICE_AUTO_RECOVER:
+                detected_device = resolve_working_video_device(active_video_device)
+                if detected_device != active_video_device:
+                    print(f'switching video device from {active_video_device} to {detected_device}')
+                    active_video_device = detected_device
+
+            cap = open_capture(active_video_device)
             if not cap.isOpened():
-                print('Unable to open camera device', file=sys.stderr)
+                print(f'Unable to open camera device /dev/video{active_video_device}', file=sys.stderr)
                 cap = None
                 time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
                 continue
