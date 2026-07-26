@@ -115,7 +115,7 @@
       return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     }
 
-    function renderRemainingSeconds(remainingSeconds, hasSession, billingIsStarted) {
+    function renderRemainingSeconds(remainingSeconds, hasSession, billingIsStarted, streamIsReady) {
       if (!remainingTime) {
         return;
       }
@@ -124,7 +124,7 @@
         remainingTime.textContent = formatSeconds(safe);
         return;
       }
-      if (billingIsStarted) {
+      if (billingIsStarted && streamIsReady) {
         remainingTime.textContent = formatSeconds(safe);
       } else {
         remainingTime.textContent = `${formatSeconds(safe)} (waiting for stream)`;
@@ -170,7 +170,7 @@
         const payload = await response.json();
         if (payload.status === 'ok' && payload.billing_started) {
           billingStarted = true;
-          renderRemainingSeconds(payload.remaining_seconds, true, true);
+          renderRemainingSeconds(payload.remaining_seconds, true, true, streamReady);
         }
       } catch (error) {
         // Retry on next poll interval.
@@ -313,7 +313,7 @@
           return;
         }
 
-        renderRemainingSeconds(payload.remaining_seconds, payload.active, payload.billing_started);
+        renderRemainingSeconds(payload.remaining_seconds, payload.active, payload.billing_started, payload.stream_ready);
         hasActiveSession = Boolean(payload.active);
         streamLive = Boolean(payload.stream_live);
         streamReady = Boolean(payload.stream_ready);

@@ -285,6 +285,47 @@ def test_session_start_requires_stream_ready(client):
     assert payload['message'] == 'stream not ready'
 
 
+def test_billing_pauses_when_stream_not_ready(client):
+    client.post('/register', data={
+        'username': 'sara',
+        'password': 'secret123',
+        'email': 'sara@example.com'
+    })
+    client.post('/login', data={
+        'username': 'sara',
+        'password': 'secret123'
+    })
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-sara',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-sara')
+
+    request_response = client.post('/request_car')
+    assert request_response.status_code == 200
+
+    client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
+    start_response = client.post('/api/session/start')
+    assert start_response.status_code == 200
+
+    first_status = client.get('/api/session/status').get_json()
+    remaining_before = first_status['remaining_seconds']
+
+    # Force stream to become not-ready quickly and trigger session refresh.
+    client.application.config['STREAM_STALE_SECONDS'] = 0.0
+    client.application.config['STREAM_READY_WINDOW_SECONDS'] = 1.0
+    client.get('/')
+
+    second_status = client.get('/api/session/status').get_json()
+    remaining_after = second_status['remaining_seconds']
+
+    # Billing should pause when stream is not ready.
+    assert remaining_after == remaining_before
+
+
 def test_release_still_works_when_stream_never_started(client):
     client.post('/register', data={
         'username': 'nina',

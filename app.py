@@ -116,6 +116,8 @@ def create_app(test_config=None):
             ensure_column('users', 'balance', 'INTEGER DEFAULT 0')
             ensure_column('sessions', 'billing_started_at', 'TEXT')
             ensure_column('sessions', 'allocated_seconds', "INTEGER DEFAULT 300")
+            ensure_column('sessions', 'consumed_seconds', 'INTEGER DEFAULT 0')
+            ensure_column('sessions', 'last_billing_at', 'TEXT')
             ensure_column('devices', 'poll_url', 'TEXT')
             ensure_column('devices', 'last_seen_at', 'TEXT')
             ensure_column('devices', 'last_poll_ok', 'INTEGER DEFAULT 0')
@@ -127,7 +129,7 @@ def create_app(test_config=None):
         now = datetime.now(timezone.utc)
         last_stream_at = app_state.get('last_stream_at')
         active_rows = db.execute(
-            "SELECT id, user_id, device_id, billing_started_at, allocated_seconds FROM sessions WHERE status = 'active'"
+            "SELECT id, user_id, device_id, billing_started_at, allocated_seconds, consumed_seconds, last_billing_at FROM sessions WHERE status = 'active'"
         ).fetchall()
         changed = False
 
@@ -137,8 +139,27 @@ def create_app(test_config=None):
                 continue
 
             allocated_seconds = max(0, int(row['allocated_seconds'] or app.config['SESSION_DURATION_SECONDS']))
-            elapsed_seconds = max(0, int((now - billing_started_at).total_seconds()))
-            remaining_seconds = max(0, allocated_seconds - elapsed_seconds)
+            consumed_seconds = max(0, int(row['consumed_seconds'] or 0))
+            last_billing_at = parse_timestamp(row['last_billing_at']) or billing_started_at
+
+            if is_stream_ready(now):
+                elapsed_seconds = max(0, int((now - last_billing_at).total_seconds()))
+                if elapsed_seconds > 0:
+                    consumed_seconds = min(allocated_seconds, consumed_seconds + elapsed_seconds)
+                    db.execute(
+                        'UPDATE sessions SET consumed_seconds = ?, last_billing_at = ? WHERE id = ?',
+                        (consumed_seconds, format_timestamp(now), row['id']),
+                    )
+                    changed = True
+            elif row['last_billing_at'] != format_timestamp(now):
+                # Keep a moving anchor while stream is not ready so offline time is not billed.
+                db.execute(
+                    'UPDATE sessions SET last_billing_at = ? WHERE id = ?',
+                    (format_timestamp(now), row['id']),
+                )
+                changed = True
+
+            remaining_seconds = max(0, allocated_seconds - consumed_seconds)
 
             if remaining_seconds <= 0:
                 db.execute("UPDATE sessions SET status = 'expired' WHERE id = ?", (row['id'],))
@@ -180,7 +201,7 @@ def create_app(test_config=None):
     def get_active_session(user_id):
         db = get_db()
         return db.execute('''
-            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, s.allocated_seconds, d.name
+            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, s.allocated_seconds, s.consumed_seconds, s.last_billing_at, d.name
             FROM sessions s
             JOIN devices d ON d.id = s.device_id
             WHERE s.user_id = ? AND s.status = 'active'
@@ -195,9 +216,8 @@ def create_app(test_config=None):
             billing_started_at = parse_timestamp(active_session['billing_started_at'])
             if billing_started_at is None:
                 return allocated_seconds
-            now = datetime.now(timezone.utc)
-            elapsed_seconds = max(0, int((now - billing_started_at).total_seconds()))
-            return max(0, allocated_seconds - elapsed_seconds)
+            consumed_seconds = max(0, int(active_session['consumed_seconds'] or 0))
+            return max(0, allocated_seconds - consumed_seconds)
         user = get_user_view(user_id)
         return max(0, int(user['balance'])) if user else 0
 
@@ -714,7 +734,7 @@ def create_app(test_config=None):
         db = get_db()
         releasable_session = db.execute(
             """
-            SELECT id, device_id, status, billing_started_at, allocated_seconds
+            SELECT id, device_id, status, billing_started_at, allocated_seconds, consumed_seconds, last_billing_at
             FROM sessions
             WHERE user_id = ? AND status IN ('active', 'stream_lost')
             ORDER BY id DESC
@@ -795,7 +815,10 @@ def create_app(test_config=None):
         if active_session['billing_started_at'] is None:
             now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             db = get_db()
-            db.execute('UPDATE sessions SET billing_started_at = ? WHERE id = ?', (now, active_session['id']))
+            db.execute(
+                'UPDATE sessions SET billing_started_at = ?, last_billing_at = ?, consumed_seconds = 0 WHERE id = ?',
+                (now, now, active_session['id']),
+            )
             db.commit()
             active_session = get_active_session(session['user_id'])
 
