@@ -37,6 +37,8 @@ VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
 CAMERA_FOURCC = os.environ.get('CAMERA_FOURCC', 'MJPG').strip().upper()
 CAPTURE_BUFFER_SIZE = int(os.environ.get('CAPTURE_BUFFER_SIZE', '1'))
 STREAM_IDLE_POLL_SECONDS = float(os.environ.get('STREAM_IDLE_POLL_SECONDS', '2.0'))
+STREAM_STATUS_POLL_SECONDS = max(0.2, float(os.environ.get('STREAM_STATUS_POLL_SECONDS', '1.0')))
+STREAM_STATUS_FAILURE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_STATUS_FAILURE_GRACE_SECONDS', '20.0')))
 STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
 STREAM_PIPELINE = os.environ.get('STREAM_PIPELINE', 'auto').strip().lower()
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
@@ -268,7 +270,7 @@ def fetch_stream_enabled():
         return bool(payload.get('enabled', False))
     except Exception as exc:
         print(f'stream status check failed: {exc}', file=sys.stderr)
-        return False
+        return None
 
 
 def fetch_stream_enabled_profiled(poll_count):
@@ -494,11 +496,27 @@ def main():
     h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
     next_video_probe_at = 0.0
     stream_disabled_since = None
+    stream_enabled = False
+    next_status_poll_at = 0.0
+    last_status_success_at = 0.0
     poll_count = 0
 
     while True:
-        poll_count += 1
-        stream_enabled = fetch_stream_enabled_profiled(poll_count)
+        now_monotonic = time.monotonic()
+        if now_monotonic >= next_status_poll_at:
+            poll_count += 1
+            polled_enabled = fetch_stream_enabled_profiled(poll_count)
+            next_status_poll_at = now_monotonic + STREAM_STATUS_POLL_SECONDS
+
+            if polled_enabled is None:
+                # Keep previous state for transient network/proxy failures.
+                if stream_enabled and last_status_success_at > 0:
+                    if (now_monotonic - last_status_success_at) > STREAM_STATUS_FAILURE_GRACE_SECONDS:
+                        stream_enabled = False
+                # If already disabled, remain disabled.
+            else:
+                stream_enabled = bool(polled_enabled)
+                last_status_success_at = now_monotonic
 
         if stream_enabled != last_enabled:
             state_text = 'enabled' if stream_enabled else 'disabled'
