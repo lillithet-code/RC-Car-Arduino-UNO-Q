@@ -179,7 +179,6 @@ def main():
                 try:
                     active_input = h264_input_formats[h264_input_index]
                     h264_process = start_h264_ffmpeg(active_input)
-                    h264_failures = 0
                 except Exception as exc:
                     print(f'h264 pipeline start failed, fallback to mjpg: {exc}', file=sys.stderr)
                     selected_pipeline = 'mjpg'
@@ -187,6 +186,7 @@ def main():
 
             if h264_process.poll() is not None:
                 h264_failures += 1
+                exit_code = h264_process.returncode
                 stderr_output = ''
                 try:
                     if h264_process.stderr is not None:
@@ -206,7 +206,10 @@ def main():
                         f'rotating h264 input format to {h264_input_formats[h264_input_index]}',
                         file=sys.stderr,
                     )
-                if h264_failures >= 5:
+                if exit_code == -11:
+                    print('h264 encoder crashed with segmentation fault; falling back to mjpg pipeline', file=sys.stderr)
+                    selected_pipeline = 'mjpg'
+                elif h264_failures >= 5:
                     print('h264 encoder repeatedly failed; falling back to mjpg pipeline', file=sys.stderr)
                     selected_pipeline = 'mjpg'
                 time.sleep(0.2)
@@ -223,6 +226,7 @@ def main():
 
             try:
                 post_bytes(STREAM_H264_ENDPOINT, chunk, 'video/h264')
+                h264_failures = 0
             except Exception as exc:
                 print(f'H264 upload failed: {exc}', file=sys.stderr)
             continue
