@@ -32,8 +32,8 @@ else
   HOST="${HOST:-0.0.0.0}"
 fi
 PORT="${PORT:-8000}"
-GUNICORN_WORKERS="${GUNICORN_WORKERS:-3}"
-GUNICORN_THREADS="${GUNICORN_THREADS:-4}"
+GUNICORN_WORKERS="${GUNICORN_WORKERS:-1}"
+GUNICORN_THREADS="${GUNICORN_THREADS:-8}"
 RUN_USER="${RUN_USER:-$(id -un)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="${SOURCE_DIR:-$SCRIPT_DIR}"
@@ -144,7 +144,7 @@ After=network.target
 [Service]
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
-ExecStart=$APP_DIR/.venv/bin/gunicorn --workers $GUNICORN_WORKERS --threads $GUNICORN_THREADS --bind $HOST:$PORT app:app
+ExecStart=$APP_DIR/.venv/bin/gunicorn --worker-class gthread --workers $GUNICORN_WORKERS --threads $GUNICORN_THREADS --bind $HOST:$PORT app:app
 Restart=always
 RestartSec=5
 User=$RUN_USER

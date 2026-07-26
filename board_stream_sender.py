@@ -425,6 +425,7 @@ def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
             '-pix_fmt', 'nv12',
             '-g', str(effective_gop),
             '-bf', '0',
+            '-bsf:v', 'dump_extra',
             '-b:v', H264_BITRATE,
             '-maxrate', H264_MAXRATE,
             '-bufsize', H264_BUFSIZE,

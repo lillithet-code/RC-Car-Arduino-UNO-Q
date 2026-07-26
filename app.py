@@ -212,6 +212,7 @@ def create_app(test_config=None):
     peer_connections = set()
     h264_decoder = CodecContext.create('h264', 'r') if CodecContext is not None else None
     h264_parse_errors = 0
+    h264_headers_seen = False
 
     webrtc_loop = None
     if WEBRTC_AVAILABLE:
@@ -293,6 +294,37 @@ def create_app(test_config=None):
     def mark_stream_activity():
         now = datetime.now(timezone.utc)
         app_state['last_stream_at'] = now
+
+    def h264_chunk_has_parameter_sets(data):
+        # Annex-B NAL scan for SPS (7) and PPS (8). We decode only after both are seen.
+        saw_sps = False
+        saw_pps = False
+        i = 0
+        length = len(data)
+        while i + 4 <= length:
+            if data[i:i + 3] == b'\x00\x00\x01':
+                nal_start = i + 3
+                i = nal_start
+            elif i + 4 <= length and data[i:i + 4] == b'\x00\x00\x00\x01':
+                nal_start = i + 4
+                i = nal_start
+            else:
+                i += 1
+                continue
+
+            if nal_start >= length:
+                break
+
+            nal_type = data[nal_start] & 0x1F
+            if nal_type == 7:
+                saw_sps = True
+            elif nal_type == 8:
+                saw_pps = True
+
+            if saw_sps and saw_pps:
+                return True
+
+        return False
 
     def is_device_online(device_row, now=None):
         if now is None:
@@ -858,7 +890,7 @@ def create_app(test_config=None):
     @app.route('/api/video/h264/chunk', methods=['POST'])
     def api_video_h264_chunk():
         nonlocal latest_stream_chunk, pipeline_frame_counter
-        nonlocal h264_parse_errors
+        nonlocal h264_parse_errors, h264_decoder, h264_headers_seen
 
         board_name = resolve_board_name()
 
@@ -877,6 +909,20 @@ def create_app(test_config=None):
         mark_stream_activity()
         if board_name:
             mark_board_activity_for_device('h264_chunk', board_name)
+
+        has_parameter_sets = h264_chunk_has_parameter_sets(data)
+        if has_parameter_sets:
+            # Fresh SPS/PPS boundary: reset decoder state to avoid stale refs.
+            h264_headers_seen = True
+            if CodecContext is not None:
+                try:
+                    h264_decoder = CodecContext.create('h264', 'r')
+                except Exception:
+                    pass
+
+        if not h264_headers_seen:
+            # Keep liveness but skip decode until a self-describing chunk arrives.
+            return jsonify({'status': 'ok', 'decoded': False, 'frame_id': pipeline_frame_counter})
 
         decoded_any = False
         decoded_frames = 0
