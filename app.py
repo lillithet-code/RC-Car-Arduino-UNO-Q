@@ -445,10 +445,17 @@ def create_app(test_config=None):
         timestamp_raw = format_timestamp(now)
 
         if board_name:
-            db.execute(
-                'UPDATE devices SET last_seen_at = ?, last_poll_ok = 1, last_poll_error = NULL WHERE name = ?',
-                (timestamp_raw, board_name),
-            )
+            existing = db.execute('SELECT id FROM devices WHERE name = ?', (board_name,)).fetchone()
+            if existing is None:
+                db.execute(
+                    'INSERT INTO devices (name, kind, location, status, last_seen_at, last_poll_ok, last_poll_error) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (board_name, 'arduino', 'unknown', 'offline', timestamp_raw, 1, None),
+                )
+            else:
+                db.execute(
+                    'UPDATE devices SET last_seen_at = ?, last_poll_ok = 1, last_poll_error = NULL WHERE name = ?',
+                    (timestamp_raw, board_name),
+                )
         else:
             rows = db.execute('SELECT name FROM devices ORDER BY id').fetchall()
             if len(rows) == 1:
@@ -977,6 +984,8 @@ def create_app(test_config=None):
         board_name = normalize_board_name(resolve_board_name())
         if not board_name:
             return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
+
+        mark_board_activity_for_device('stream_config_poll', board_name)
 
         db = get_db()
         active_row = db.execute(
