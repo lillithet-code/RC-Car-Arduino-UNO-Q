@@ -16,6 +16,11 @@ try:
 except ImportError:  # pragma: no cover - exercised when msgpack is missing
     msgpack = None
 
+try:
+    from websocket import create_connection
+except ImportError:  # pragma: no cover - exercised when websocket-client is missing
+    create_connection = None
+
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
 BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
 SERIAL_PORT = os.environ.get('SERIAL_PORT', '/dev/ttyACM0')
@@ -26,6 +31,8 @@ COMMAND_BRIDGE = os.environ.get('COMMAND_BRIDGE', '').strip()
 ROUTER_SOCKET_PATH = os.environ.get('ROUTER_SOCKET_PATH', '/var/run/arduino-router.sock').strip()
 BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
 BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
+COMMAND_WS_URL = os.environ.get('COMMAND_WS_URL', '').strip()
+COMMAND_WS_RETRY_SECONDS = float(os.environ.get('COMMAND_WS_RETRY_SECONDS', '1.0'))
 
 COMMAND_MAP = {
     'forward': 'F',
@@ -54,16 +61,19 @@ def action_to_serial_command(action):
     return COMMAND_MAP.get(action.lower().strip())
 
 
-def fetch_command():
-    board_name = urllib_parse.quote(BOARD_NAME, safe='')
-    url = f'{SERVER_BASE_URL}/api/board/command?token={BOARD_TOKEN}&board_name={board_name}'
-    req = urllib_request.Request(url, headers={'User-Agent': 'RC-Car-Board/1.0'})
-    try:
-        with urllib_request.urlopen(req, timeout=1) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-            return payload.get('action')
-    except Exception:
-        return None
+def build_command_ws_url():
+    if COMMAND_WS_URL:
+        base = COMMAND_WS_URL.rstrip('/')
+    else:
+        parsed = urllib_parse.urlparse(SERVER_BASE_URL)
+        scheme = 'wss' if parsed.scheme == 'https' else 'ws'
+        netloc = parsed.netloc or parsed.path
+        base = f'{scheme}://{netloc}/ws/board/commands'
+
+    separator = '&' if '?' in base else '?'
+    board_param = urllib_parse.quote(BOARD_NAME, safe='')
+    token_param = urllib_parse.quote(BOARD_TOKEN, safe='')
+    return f'{base}{separator}token={token_param}&board_name={board_param}'
 
 
 def resolve_command_target():
@@ -256,8 +266,16 @@ def register_device():
         return False
 
 
+def open_command_websocket():
+    if create_connection is None:
+        raise RuntimeError('websocket-client is required for command websocket transport')
+    ws_url = build_command_ws_url()
+    return create_connection(ws_url, timeout=5)
+
+
 def main():
     connection = None
+    command_ws = None
 
     register_device()
 
@@ -281,20 +299,48 @@ def main():
                 time.sleep(max(SERIAL_RETRY_SECONDS, 0.1))
                 continue
 
-        action = fetch_command()
-        if action:
+        if command_ws is None:
             try:
-                if send_command_on_connection(action, connection):
-                    print(action)
+                command_ws = open_command_websocket()
+                print('command websocket connected')
             except Exception as exc:  # pragma: no cover - runtime path
-                print(f'command failed: {exc}')
-                if connection is not None:
-                    try:
-                        connection.close()
-                    except Exception:
-                        pass
+                print(f'command websocket connect failed: {exc}')
+                time.sleep(max(COMMAND_WS_RETRY_SECONDS, 0.2))
+                continue
+
+        try:
+            raw_message = command_ws.recv()
+            if not raw_message:
+                raise RuntimeError('empty websocket message')
+
+            payload = json.loads(raw_message)
+            action = payload.get('action')
+            if not action:
+                continue
+
+            if transport == 'disabled':
+                print(f'ignored action while transport disabled: {action}')
+                continue
+
+            if send_command_on_connection(action, connection):
+                print(action)
+        except Exception as exc:  # pragma: no cover - runtime path
+            print(f'command websocket error: {exc}')
+            if command_ws is not None:
+                try:
+                    command_ws.close()
+                except Exception:
+                    pass
+            command_ws = None
+
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
                 connection = None
-        time.sleep(0.05)
+
+            time.sleep(max(COMMAND_WS_RETRY_SECONDS, 0.2))
 
 
 if __name__ == '__main__':

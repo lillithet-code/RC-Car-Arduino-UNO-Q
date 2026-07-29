@@ -1,0 +1,13 @@
+logLevel: info
+
+rtspAddress: :8554
+webrtcAddress: :8889
+
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# Streams are dynamic. Boards publish to paths like /cars/<board_name>.
+# Browsers subscribe via WHEP at /cars/<board_name>/whep.
+paths:
+  all_others:
+    source: publisher

@@ -35,6 +35,9 @@ const int lightPins[] = {LIGHT_PIN_1, LIGHT_PIN_2, LIGHT_PIN_3, LIGHT_PIN_4};
 int speedLevel = DEFAULT_SPEED_LEVEL;
 bool headlightsOn = false;
 int steeringAngle = 90;
+const unsigned long COMMAND_TIMEOUT_MS = 550;
+unsigned long lastMotionCommandAtMs = 0;
+bool motorCommandActive = false;
 
 void setup() {
   pinMode(motorPWM, OUTPUT);
@@ -67,6 +70,7 @@ void setup() {
 #endif
 
   stopCar();
+  lastMotionCommandAtMs = millis();
 }
 
 void loop() {
@@ -110,9 +114,15 @@ void loop() {
         break;
     }
   }
+
+  if (motorCommandActive && (millis() - lastMotionCommandAtMs) > COMMAND_TIMEOUT_MS) {
+    stopCar();
+  }
 }
 
 void driveForward() {
+  motorCommandActive = true;
+  lastMotionCommandAtMs = millis();
   analogWrite(motorPWM, speedLevel);
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
@@ -120,6 +130,8 @@ void driveForward() {
 }
 
 void driveBackward() {
+  motorCommandActive = true;
+  lastMotionCommandAtMs = millis();
   analogWrite(motorPWM, speedLevel);
   digitalWrite(motorIN1, LOW);
   digitalWrite(motorIN2, HIGH);
@@ -127,6 +139,8 @@ void driveBackward() {
 }
 
 void turnLeft() {
+  motorCommandActive = true;
+  lastMotionCommandAtMs = millis();
   analogWrite(motorPWM, speedLevel / 2);
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
@@ -135,6 +149,8 @@ void turnLeft() {
 }
 
 void turnRight() {
+  motorCommandActive = true;
+  lastMotionCommandAtMs = millis();
   analogWrite(motorPWM, speedLevel / 2);
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
@@ -143,6 +159,8 @@ void turnRight() {
 }
 
 void stopCar() {
+  motorCommandActive = false;
+  lastMotionCommandAtMs = millis();
   analogWrite(motorPWM, 0);
   digitalWrite(motorIN1, LOW);
   digitalWrite(motorIN2, LOW);

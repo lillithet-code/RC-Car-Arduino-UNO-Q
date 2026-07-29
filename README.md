@@ -1,114 +1,92 @@
 # RC-Car-Arduino-UNO-Q
 
-This project provides a simple web interface for streaming video from a standard USB webcam connected to the UNO Q board, where the board's Linux system handles the camera feed and forwards it to the server.
+Remote RC car control stack with per-car session isolation, MediaMTX passthrough streaming, and board-safe command handling.
 
-## Features
-- Lightweight Flask web app
-- Live MJPEG-style video feed
-- Easy deployment on a Debian server
+## What changed
+- H.264-over-HTTP chunk ingest is removed from the primary path.
+- UNO Q Linux now publishes H.264 once to MediaMTX (RTSP).
+- Browser playback uses WebRTC WHEP from MediaMTX (no server-side decode/re-encode).
+- Board command delivery is now persistent WebSocket (no 20 Hz polling loop).
+- Command queues and stream state are scoped per car.
+- Control API now requires logged-in user ownership of an active session.
+- MCU firmware includes a 550 ms motion-command failsafe timeout.
 
-## Requirements
-- Python 3.10+
-- pip
-- A working video source such as a standard USB webcam or another supported camera source
+## Architecture
+- Flask app:
+   - Handles auth, booking, billing, per-session authorization
+   - Issues per-car stream config to board and browser
+   - Delivers control actions per-car to board over WebSocket
+- MediaMTX:
+   - Receives published H.264 stream for each car path
+   - Relays to browser via WHEP/WebRTC
+- Board Linux helpers:
+   - `board_stream_sender.py` publishes camera to MediaMTX RTSP target from server config
+   - `board_commands.py` consumes per-car command WebSocket and writes serial/RPC commands to MCU
+- Arduino firmware:
+   - Stops drivetrain if no motion command arrives for ~550 ms
 
-## Setup
+## Quick start
 
-1. Create a virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Run the app:
-   ```bash
-   python app.py
-   ```
-
-4. Open your browser at:
-   ```text
-   http://YOUR_SERVER_IP:8000/
-   ```
-
-## Using a different video source
-If your camera is not the default device, start the app with:
-
+1. Install Python dependencies:
 ```bash
-VIDEO_SOURCE=/dev/video0 python app.py
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-## Board-side streaming and control
-The repository now includes a lightweight board-side helper that can publish the webcam feed to the server and poll for commands:
+2. Install and start MediaMTX on the server:
+```bash
+./install_mediamtx_linux.sh
+sudo systemctl start mediamtx
+```
 
-- `board_stream_sender.py` captures from the webcam and posts JPEG chunks to `/api/stream/chunk`
-- `board_commands.py` polls `/api/board/command` for the next control action
+3. Run the web app:
+```bash
+python app.py
+```
 
-Run them on the UNO Q board's Linux side:
+4. Configure server env so app can emit stream URLs:
+```bash
+export MEDIAMTX_RTSP_BASE=rtsp://YOUR_SERVER_IP:8554
+export MEDIAMTX_WHEP_BASE=http://YOUR_SERVER_IP:8889
+export MEDIAMTX_STREAM_PREFIX=cars
+```
 
+5. On board Linux side, run helpers:
 ```bash
 python3 board_stream_sender.py
 python3 board_commands.py
 ```
 
-Set the server URL and board token if needed:
+## Board-side variables
+- `SERVER_URL`: Flask server base URL
+- `BOARD_TOKEN`: shared board token
+- `BOARD_NAME`: unique car identity
+- `VIDEO_DEVICE`: camera index or `/dev/videoN` or `auto`
+- `COMMAND_WS_URL`: optional explicit command WS URL
+- `MEDIAMTX_RTSP_URL`: optional fixed override target (if not using server-provided URL)
 
+## Server-side variables
+- `BOARD_TOKEN`: shared board token
+- `MEDIAMTX_RTSP_BASE`: RTSP publish base, e.g. `rtsp://server:8554`
+- `MEDIAMTX_WHEP_BASE`: WebRTC/WHEP base, e.g. `http://server:8889`
+- `MEDIAMTX_STREAM_PREFIX`: path prefix, defaults to `cars`
+
+Per-car path format:
+- RTSP publish: `rtsp://server:8554/cars/<board_name>`
+- Browser WHEP: `http://server:8889/cars/<board_name>/whep`
+
+## Install scripts
+
+Server app install:
 ```bash
-SERVER_URL=http://YOUR_SERVER_IP:8000 BOARD_TOKEN=your-token python3 board_stream_sender.py
-```
-
-## Production deployment on Debian
-For a production setup, run the app behind a reverse proxy such as Nginx and use Gunicorn.
-
-Install Gunicorn:
-```bash
-pip install gunicorn
-```
-
-Run:
-```bash
-gunicorn --bind 0.0.0.0:8000 app:app
-```
-
-## Linux installer scripts
-Use the dedicated installers for each host role:
-
-### Board-side machine
-Run this on the Arduino UNO Q / Linux board host:
-
-```bash
-chmod +x install_board_linux.sh
-./install_board_linux.sh
-```
-
-This installs the Python dependencies, serial support, webcam-related packages, and starts the board-side helper services.
-
-To auto-select the first working camera device, run:
-
-```bash
-VIDEO_DEVICE=auto ./install_board_linux.sh
-```
-
-`VIDEO_DEVICE` supports either:
-- `auto` or `0` to probe and pick the first camera that can actually return frames
-- a numeric index such as `2`
-- a Linux path such as `/dev/video2` (this is normalized to index `2` by the installer)
-
-### Server-side machine
-Run this on the server that will host the web app and Plex prerequisites:
-
-```bash
-chmod +x install_server_linux.sh
 ./install_server_linux.sh
 ```
 
-This installs the Flask/Gunicorn dependencies, sets up the web app as a systemd service, and prepares the environment for Plex.
+Board install:
+```bash
+./install_board_linux.sh
+```
 
-## Notes
-- This is a starting point for streaming from an Arduino UNO Q setup where the USB webcam feed is handled by the board's Linux system and forwarded to the server, or from another supported camera source.
-- For a real-world project, you may want to replace the current direct camera-stream approach on both the server and the Arduino side with a dedicated video pipeline or a more robust streaming protocol.
+MediaMTX config template is included in `mediamtx.yml`.
 

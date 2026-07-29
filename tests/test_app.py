@@ -490,10 +490,29 @@ def test_video_pipeline_stream_route_is_available(client):
 
 
 def test_board_commands_are_exposed_for_the_board_client(client):
+    client.post('/register', data={
+        'username': 'otto',
+        'password': 'secret123',
+        'email': 'otto@example.com'
+    })
+    client.post('/login', data={
+        'username': 'otto',
+        'password': 'secret123'
+    })
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-otto',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    assert register_response.status_code == 200
+    mark_board_online(client, 'rc-car-otto')
+    request_response = client.post('/request_car')
+    assert request_response.status_code == 200
+
     response = client.post('/api/control', json={'action': 'forward'})
     assert response.status_code == 200
 
-    board_response = client.get('/api/board/command?token=dev-board-token')
+    board_response = client.get('/api/board/command?token=dev-board-token&board_name=rc-car-otto')
     assert board_response.status_code == 200
     payload = board_response.get_json()
     assert payload['status'] == 'ok'
@@ -501,7 +520,7 @@ def test_board_commands_are_exposed_for_the_board_client(client):
 
 
 def test_board_stream_status_reflects_active_sessions(client):
-    inactive_response = client.get('/api/board/stream/status?token=dev-board-token')
+    inactive_response = client.get('/api/board/stream/status?token=dev-board-token&board_name=rc-car-ivy')
     assert inactive_response.status_code == 200
     inactive_payload = inactive_response.get_json()
     assert inactive_payload['status'] == 'ok'
@@ -525,7 +544,7 @@ def test_board_stream_status_reflects_active_sessions(client):
     mark_board_online(client, 'rc-car-ivy')
     client.post('/request_car')
 
-    active_response = client.get('/api/board/stream/status?token=dev-board-token')
+    active_response = client.get('/api/board/stream/status?token=dev-board-token&board_name=rc-car-ivy')
     assert active_response.status_code == 200
     active_payload = active_response.get_json()
     assert active_payload['status'] == 'ok'

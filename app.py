@@ -1,39 +1,25 @@
 import os
-import asyncio
 import threading
 import time
+import re
+import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
 from sqlite3 import dbapi2 as sqlite3
 from urllib import error as urllib_error
+from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 from flask import Flask, g, redirect, render_template, request, session, url_for, jsonify, Response
+from flask_sock import Sock
+from simple_websocket import ConnectionClosed
 from werkzeug.security import generate_password_hash, check_password_hash
-
-try:
-    from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
-    from av import VideoFrame, CodecContext, Packet
-    import cv2
-    import numpy as np
-    WEBRTC_AVAILABLE = True
-except Exception:
-    RTCPeerConnection = None
-    RTCSessionDescription = None
-    VideoStreamTrack = None
-    RTCConfiguration = None
-    RTCIceServer = None
-    VideoFrame = None
-    CodecContext = None
-    Packet = None
-    cv2 = None
-    np = None
-    WEBRTC_AVAILABLE = False
 
 
 def create_app(test_config=None):
     app = Flask(__name__)
+    sock = Sock(app)
     app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
     app.config['DATABASE_URL'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
     app.config['STREAM_MAX_QUEUE'] = int(os.environ.get('STREAM_MAX_QUEUE', '1'))
@@ -44,7 +30,7 @@ def create_app(test_config=None):
     app.config['STREAM_READY_MIN_FRAMES'] = max(2, int(os.environ.get('STREAM_READY_MIN_FRAMES', '6')))
     app.config['STREAM_VISIBILITY_TTL_SECONDS'] = max(1.0, float(os.environ.get('STREAM_VISIBILITY_TTL_SECONDS', '2.5')))
     app.config['STREAM_LOSS_GRACE_SECONDS'] = float(os.environ.get('STREAM_LOSS_GRACE_SECONDS', '30.0'))
-    app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '25'))
+    app.config['WEBRTC_TRACK_FPS'] = int(os.environ.get('WEBRTC_TRACK_FPS', '30'))
     app.config['STREAM_CROP_BOTTOM_PX'] = max(0, int(os.environ.get('STREAM_CROP_BOTTOM_PX', '2')))
     app.config['STREAM_JPEG_QUALITY'] = max(30, min(95, int(os.environ.get('STREAM_JPEG_QUALITY', '65'))))
     app.config['H264_INGEST_QUEUE_MAX'] = max(1, int(os.environ.get('H264_INGEST_QUEUE_MAX', '8')))
@@ -53,6 +39,10 @@ def create_app(test_config=None):
     app.config['BOARD_POLL_INTERVAL_SECONDS'] = max(1.0, float(os.environ.get('BOARD_POLL_INTERVAL_SECONDS', '2.0')))
     app.config['BOARD_POLL_TIMEOUT_SECONDS'] = max(0.2, float(os.environ.get('BOARD_POLL_TIMEOUT_SECONDS', '1.5')))
     app.config['BOARD_ACTIVE_STALE_SECONDS'] = max(2.0, float(os.environ.get('BOARD_ACTIVE_STALE_SECONDS', '8.0')))
+    app.config['COMMAND_QUEUE_MAX'] = max(1, int(os.environ.get('COMMAND_QUEUE_MAX', '32')))
+    app.config['MEDIAMTX_RTSP_BASE'] = os.environ.get('MEDIAMTX_RTSP_BASE', '').strip().rstrip('/')
+    app.config['MEDIAMTX_WHEP_BASE'] = os.environ.get('MEDIAMTX_WHEP_BASE', '').strip().rstrip('/')
+    app.config['MEDIAMTX_STREAM_PREFIX'] = os.environ.get('MEDIAMTX_STREAM_PREFIX', 'cars').strip().strip('/') or 'cars'
 
     if test_config:
         app.config.update(test_config)
@@ -128,13 +118,26 @@ def create_app(test_config=None):
     def refresh_sessions():
         db = get_db()
         now = datetime.now(timezone.utc)
-        last_stream_at = app_state.get('last_stream_at')
         active_rows = db.execute(
-            "SELECT id, user_id, device_id, billing_started_at, allocated_seconds, consumed_seconds, last_billing_at FROM sessions WHERE status = 'active'"
+            """
+            SELECT
+                s.id,
+                s.user_id,
+                s.device_id,
+                s.billing_started_at,
+                s.allocated_seconds,
+                s.consumed_seconds,
+                s.last_billing_at,
+                d.name AS device_name
+            FROM sessions s
+            JOIN devices d ON d.id = s.device_id
+            WHERE s.status = 'active'
+            """
         ).fetchall()
         changed = False
 
         for row in active_rows:
+            device_name = row['device_name']
             billing_started_at = parse_timestamp(row['billing_started_at'])
             if billing_started_at is None:
                 continue
@@ -143,7 +146,7 @@ def create_app(test_config=None):
             consumed_seconds = max(0, int(row['consumed_seconds'] or 0))
             last_billing_at = parse_timestamp(row['last_billing_at']) or billing_started_at
 
-            if is_stream_ready(now) and is_session_visible(row['id'], now):
+            if is_stream_ready(device_name, now) and is_session_visible(row['id'], now):
                 elapsed_seconds = max(0, int((now - last_billing_at).total_seconds()))
                 if elapsed_seconds > 0:
                     consumed_seconds = min(allocated_seconds, consumed_seconds + elapsed_seconds)
@@ -170,6 +173,7 @@ def create_app(test_config=None):
                 continue
 
             # Only enforce stream-loss after at least one stream frame has been observed.
+            last_stream_at = get_board_last_stream_at(device_name)
             if billing_started_at is not None and last_stream_at is not None:
                 stream_gap_seconds = (now - last_stream_at).total_seconds()
             else:
@@ -226,13 +230,13 @@ def create_app(test_config=None):
 
     init_db()
 
-    stream_queue = Queue(maxsize=app.config['STREAM_MAX_QUEUE'])
-    latest_stream_chunk = None
-    pending_commands = Queue()
+    default_board_name = '__default__'
+    stream_states = {}
+    command_queues = {}
+    stream_state_lock = threading.Lock()
+    command_queue_lock = threading.Lock()
     pipeline_frame_counter = 0
     app_state = {
-        'last_stream_at': None,
-        'stream_frame_times': deque(maxlen=300),
         'session_visible_at': {},
         'board_last_seen_at': None,
         'board_last_source': None,
@@ -240,66 +244,83 @@ def create_app(test_config=None):
         'board_poll_ok': None,
         'board_last_error': None,
     }
-    peer_connections = set()
-    h264_decoder = CodecContext.create('h264', 'r') if CodecContext is not None else None
-    h264_parse_errors = 0
-    h264_headers_seen = False
-    h264_ingest_queue = Queue(maxsize=app.config['H264_INGEST_QUEUE_MAX'])
 
-    webrtc_loop = None
-    if WEBRTC_AVAILABLE:
-        webrtc_loop = asyncio.new_event_loop()
+    def normalize_board_name(raw_board_name):
+        value = (raw_board_name or '').strip()
+        if not value:
+            return None
+        return re.sub(r'[^a-zA-Z0-9_.-]', '-', value)
 
-        def run_webrtc_loop(loop):
-            asyncio.set_event_loop(loop)
-            loop.run_forever()
+    def board_key(raw_board_name):
+        return normalize_board_name(raw_board_name) or default_board_name
 
-        threading.Thread(target=run_webrtc_loop, args=(webrtc_loop,), daemon=True).start()
+    def get_stream_state(raw_board_name):
+        key = board_key(raw_board_name)
+        with stream_state_lock:
+            state = stream_states.get(key)
+            if state is None:
+                state = {
+                    'latest_stream_chunk': None,
+                    'stream_queue': Queue(maxsize=app.config['STREAM_MAX_QUEUE']),
+                    'last_stream_at': None,
+                    'stream_frame_times': deque(maxlen=300),
+                }
+                stream_states[key] = state
+        return state
 
-    def run_webrtc(coro, timeout=10):
-        if not WEBRTC_AVAILABLE or webrtc_loop is None:
-            raise RuntimeError('WebRTC backend not available')
-        future = asyncio.run_coroutine_threadsafe(coro, webrtc_loop)
-        return future.result(timeout=timeout)
+    def get_command_queue(raw_board_name):
+        key = board_key(raw_board_name)
+        with command_queue_lock:
+            queue = command_queues.get(key)
+            if queue is None:
+                queue = Queue(maxsize=app.config['COMMAND_QUEUE_MAX'])
+                command_queues[key] = queue
+        return queue
 
-    def get_latest_stream_chunk():
-        chunk = stream_queue.get(timeout=0.25)
+    def put_command(raw_board_name, action):
+        queue = get_command_queue(raw_board_name)
+        dropped_oldest = False
+        try:
+            queue.put_nowait(action)
+        except Full:
+            try:
+                queue.get_nowait()
+                dropped_oldest = True
+            except Empty:
+                pass
+            try:
+                queue.put_nowait(action)
+            except Full:
+                pass
+        return dropped_oldest
+
+    def get_latest_stream_chunk(raw_board_name=None):
+        state = get_stream_state(raw_board_name)
+        queue = state['stream_queue']
+        chunk = queue.get(timeout=0.25)
         while True:
             try:
-                chunk = stream_queue.get_nowait()
+                chunk = queue.get_nowait()
             except Empty:
                 return chunk
 
-    class StreamVideoTrack(VideoStreamTrack if WEBRTC_AVAILABLE else object):
-        def __init__(self, frame_provider, fallback_width=640, fallback_height=480, fps=20):
-            if WEBRTC_AVAILABLE:
-                super().__init__()
-            self._frame_provider = frame_provider
-            self._fps = max(1, int(fps))
-            self._frame_period = 1.0 / self._fps
-            self._fallback_frame = None
-            if WEBRTC_AVAILABLE and np is not None:
-                self._fallback_frame = np.zeros((fallback_height, fallback_width, 3), dtype=np.uint8)
+    def build_stream_path(raw_board_name):
+        safe_board = board_key(raw_board_name)
+        prefix = app.config['MEDIAMTX_STREAM_PREFIX']
+        return f'{prefix}/{safe_board}'
 
-        async def recv(self):
-            await asyncio.sleep(self._frame_period)
-
-            chunk = self._frame_provider()
-            frame_array = None
-            if WEBRTC_AVAILABLE and chunk and cv2 is not None and np is not None:
-                encoded = np.frombuffer(chunk, dtype=np.uint8)
-                decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
-                if decoded is not None:
-                    frame_array = decoded
-
-            if frame_array is None:
-                frame_array = self._fallback_frame
-
-            frame = VideoFrame.from_ndarray(frame_array, format='bgr24')
-            pts, time_base = await self.next_timestamp()
-            frame.pts = pts
-            frame.time_base = time_base
-            return frame
+    def build_stream_urls(raw_board_name):
+        path = build_stream_path(raw_board_name)
+        encoded_path = '/'.join(urllib_parse.quote(segment, safe='') for segment in path.split('/'))
+        rtsp_base = app.config['MEDIAMTX_RTSP_BASE']
+        whep_base = app.config['MEDIAMTX_WHEP_BASE']
+        rtsp_url = f'{rtsp_base}/{encoded_path}' if rtsp_base else None
+        whep_url = f'{whep_base}/{encoded_path}/whep' if whep_base else None
+        return {
+            'path': path,
+            'rtsp_url': rtsp_url,
+            'whep_url': whep_url,
+        }
 
     def parse_timestamp(raw_value):
         if not raw_value:
@@ -315,21 +336,23 @@ def create_app(test_config=None):
         board_name = (request.args.get('board_name') or request.headers.get('X-Board-Name') or '').strip()
         return board_name or None
 
-    def is_stream_live(now=None):
+    def is_stream_live(raw_board_name=None, now=None):
         if now is None:
             now = datetime.now(timezone.utc)
-        last_stream_at = app_state['last_stream_at']
+        stream_state = get_stream_state(raw_board_name)
+        last_stream_at = stream_state['last_stream_at']
         if last_stream_at is None:
             return False
         return (now - last_stream_at).total_seconds() <= app.config['STREAM_STALE_SECONDS']
 
-    def is_stream_ready(now=None):
+    def is_stream_ready(raw_board_name=None, now=None):
         if now is None:
             now = datetime.now(timezone.utc)
-        if not is_stream_live(now):
+        stream_state = get_stream_state(raw_board_name)
+        if not is_stream_live(raw_board_name, now):
             return False
 
-        frame_times = app_state['stream_frame_times']
+        frame_times = stream_state['stream_frame_times']
         if not frame_times:
             return False
 
@@ -338,10 +361,25 @@ def create_app(test_config=None):
         recent_frames = sum(1 for ts in frame_times if ts >= cutoff)
         return recent_frames >= int(app.config['STREAM_READY_MIN_FRAMES'])
 
-    def mark_stream_activity():
+    def mark_stream_activity(raw_board_name=None):
         now = datetime.now(timezone.utc)
-        app_state['last_stream_at'] = now
-        app_state['stream_frame_times'].append(now)
+        stream_state = get_stream_state(raw_board_name)
+        stream_state['last_stream_at'] = now
+        stream_state['stream_frame_times'].append(now)
+
+    def get_board_last_stream_at(raw_board_name):
+        return get_stream_state(raw_board_name)['last_stream_at']
+
+    def set_latest_stream_chunk(raw_board_name, data):
+        stream_state = get_stream_state(raw_board_name)
+        stream_state['latest_stream_chunk'] = data
+        queue = stream_state['stream_queue']
+        if queue.full():
+            try:
+                queue.get_nowait()
+            except Empty:
+                pass
+        queue.put(data)
 
     def mark_session_visible(session_id, visible):
         session_visible_at = app_state['session_visible_at']
@@ -358,143 +396,6 @@ def create_app(test_config=None):
         if seen_at is None:
             return False
         return (now - seen_at).total_seconds() <= app.config['STREAM_VISIBILITY_TTL_SECONDS']
-
-    def h264_chunk_has_parameter_sets(data):
-        # Annex-B NAL scan for SPS (7) and PPS (8). We decode only after both are seen.
-        saw_sps = False
-        saw_pps = False
-        i = 0
-        length = len(data)
-        while i + 4 <= length:
-            if data[i:i + 3] == b'\x00\x00\x01':
-                nal_start = i + 3
-                i = nal_start
-            elif i + 4 <= length and data[i:i + 4] == b'\x00\x00\x00\x01':
-                nal_start = i + 4
-                i = nal_start
-            else:
-                i += 1
-                continue
-
-            if nal_start >= length:
-                break
-
-            nal_type = data[nal_start] & 0x1F
-            if nal_type == 7:
-                saw_sps = True
-            elif nal_type == 8:
-                saw_pps = True
-
-            if saw_sps and saw_pps:
-                return True
-
-        return False
-
-    def decode_h264_chunk(data):
-        nonlocal latest_stream_chunk, pipeline_frame_counter
-        nonlocal h264_parse_errors, h264_decoder, h264_headers_seen
-
-        has_parameter_sets = h264_chunk_has_parameter_sets(data)
-        if has_parameter_sets:
-            # Fresh SPS/PPS boundary: reset decoder state to avoid stale refs.
-            h264_headers_seen = True
-            if CodecContext is not None:
-                try:
-                    h264_decoder = CodecContext.create('h264', 'r')
-                except Exception:
-                    pass
-
-        if not h264_headers_seen:
-            # Skip decode until a self-describing chunk arrives.
-            return False, 0
-
-        decoded_any = False
-        decoded_frames = 0
-        latest_decoded_frame = None
-        packets = []
-        try:
-            parsed_packets = h264_decoder.parse(data)
-            if parsed_packets:
-                packets.extend(parsed_packets)
-        except Exception:
-            # Parsing can fail on partial chunk boundaries; keep ingesting future chunks.
-            h264_parse_errors += 1
-            if h264_parse_errors <= 3 or h264_parse_errors % 100 == 0:
-                app.logger.warning('h264 parse failed on chunk; waiting for more data')
-
-        if not packets:
-            try:
-                packets = [Packet(data)]
-            except Exception:
-                packets = []
-
-        for packet in packets:
-            try:
-                frames = h264_decoder.decode(packet)
-            except Exception:
-                continue
-            for frame in frames:
-                decoded_frames += 1
-                latest_decoded_frame = frame
-
-        if latest_decoded_frame is not None:
-            frame_bgr = latest_decoded_frame.to_ndarray(format='bgr24')
-            crop_bottom = int(app.config.get('STREAM_CROP_BOTTOM_PX', 0) or 0)
-            if crop_bottom > 0 and frame_bgr.shape[0] > crop_bottom:
-                frame_bgr = frame_bgr[:-crop_bottom, :]
-            ok, encoded = cv2.imencode(
-                '.jpg',
-                frame_bgr,
-                [int(cv2.IMWRITE_JPEG_QUALITY), int(app.config['STREAM_JPEG_QUALITY'])],
-            )
-            if ok:
-                latest_stream_chunk = encoded.tobytes()
-                if stream_queue.full():
-                    try:
-                        stream_queue.get_nowait()
-                    except Empty:
-                        pass
-                stream_queue.put(latest_stream_chunk)
-                pipeline_frame_counter += 1
-                decoded_any = True
-
-        return decoded_any, decoded_frames
-
-    def h264_decode_worker():
-        while True:
-            data = h264_ingest_queue.get()
-            if data is None:
-                return
-
-            ingest_started = time.monotonic()
-            decoded_any, decoded_frames = decode_h264_chunk(data)
-            ingest_ms = (time.monotonic() - ingest_started) * 1000.0
-
-            if ingest_ms >= 120.0:
-                app.logger.warning(
-                    'h264 ingest slow decoded=%s decoded_frames=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
-                    decoded_any,
-                    decoded_frames,
-                    len(data),
-                    stream_queue.qsize(),
-                    ingest_ms,
-                    h264_parse_errors,
-                )
-
-            if app.config['STREAM_PROFILE'] and (pipeline_frame_counter <= 3 or pipeline_frame_counter % 30 == 0):
-                app.logger.info(
-                    'stream profile ingest=h264 decoded=%s decoded_frames=%s frame_id=%s bytes=%s queue=%s ingest_ms=%.1f parse_errors=%s',
-                    decoded_any,
-                    decoded_frames,
-                    pipeline_frame_counter,
-                    len(data),
-                    stream_queue.qsize(),
-                    ingest_ms,
-                    h264_parse_errors,
-                )
-
-    if h264_decoder is not None and cv2 is not None:
-        threading.Thread(target=h264_decode_worker, daemon=True).start()
 
     def is_device_online(device_row, now=None):
         if now is None:
@@ -789,20 +690,43 @@ def create_app(test_config=None):
                 'status': 'ok',
                 'active': False,
                 'remaining_seconds': max(0, int(user['balance'])) if user else 0,
-                'stream_live': is_stream_live(),
-                'stream_ready': is_stream_ready(),
+                'stream_live': False,
+                'stream_ready': False,
                 'billing_started': False,
             })
+
+        board_name = active_session['name']
 
         return jsonify({
             'status': 'ok',
             'active': True,
             'remaining_seconds': get_remaining_seconds(session['user_id'], active_session),
-            'stream_live': is_stream_live(),
-            'stream_ready': is_stream_ready(),
+            'stream_live': is_stream_live(board_name),
+            'stream_ready': is_stream_ready(board_name),
             'stream_visible': is_session_visible(active_session['id']),
             'billing_started': active_session['billing_started_at'] is not None,
-            'device': active_session['name'],
+            'device': board_name,
+        })
+
+    @app.route('/api/session/stream')
+    def session_stream():
+        if 'user_id' not in session:
+            return jsonify({'status': 'unauthorized'}), 401
+
+        active_session = get_active_session(session['user_id'])
+        if not active_session:
+            return jsonify({'status': 'error', 'message': 'no active session'}), 400
+
+        board_name = active_session['name']
+        stream_urls = build_stream_urls(board_name)
+        return jsonify({
+            'status': 'ok',
+            'device': board_name,
+            'stream_path': stream_urls['path'],
+            'whep_url': stream_urls['whep_url'],
+            'rtsp_url': stream_urls['rtsp_url'],
+            'ready': is_stream_ready(board_name),
+            'live': is_stream_live(board_name),
         })
 
     @app.route('/api/session/visibility', methods=['POST'])
@@ -827,10 +751,12 @@ def create_app(test_config=None):
 
     @app.route('/api/stream/live')
     def stream_live_status():
+        board_name = normalize_board_name(resolve_board_name())
         return jsonify({
             'status': 'ok',
-            'live': is_stream_live(),
-            'ready': is_stream_ready(),
+            'live': is_stream_live(board_name),
+            'ready': is_stream_ready(board_name),
+            'board_name': board_name,
             'stale_after_seconds': app.config['STREAM_STALE_SECONDS'],
             'ready_window_seconds': app.config['STREAM_READY_WINDOW_SECONDS'],
             'ready_min_frames': app.config['STREAM_READY_MIN_FRAMES'],
@@ -845,7 +771,8 @@ def create_app(test_config=None):
         if not active_session:
             return jsonify({'status': 'error', 'message': 'no active session'}), 400
 
-        if not is_stream_ready():
+        board_name = active_session['name']
+        if not is_stream_ready(board_name):
             return jsonify({'status': 'error', 'message': 'stream not ready'}), 409
 
         if active_session['billing_started_at'] is None:
@@ -866,63 +793,10 @@ def create_app(test_config=None):
 
     @app.route('/api/webrtc/offer', methods=['POST'])
     def webrtc_offer():
-        if not WEBRTC_AVAILABLE:
-            return jsonify({'status': 'error', 'message': 'WebRTC backend not available'}), 503
-        if 'user_id' not in session:
-            return jsonify({'status': 'error', 'message': 'unauthorized'}), 401
-
-        active_session = get_active_session(session['user_id'])
-        if not active_session:
-            return jsonify({'status': 'error', 'message': 'no active session'}), 400
-
-        payload = request.get_json(silent=True) or {}
-        sdp = payload.get('sdp')
-        offer_type = payload.get('type')
-        if not sdp or not offer_type:
-            return jsonify({'status': 'error', 'message': 'invalid offer payload'}), 400
-
-        async def handle_offer():
-            pc = RTCPeerConnection(
-                RTCConfiguration(
-                    iceServers=[RTCIceServer(urls=['stun:stun.l.google.com:19302'])]
-                )
-            )
-            peer_connections.add(pc)
-
-            @pc.on('connectionstatechange')
-            async def on_connectionstatechange():
-                if pc.connectionState in {'failed', 'closed', 'disconnected'}:
-                    await pc.close()
-                    peer_connections.discard(pc)
-
-            track = StreamVideoTrack(lambda: latest_stream_chunk, fps=app.config['WEBRTC_TRACK_FPS'])
-            pc.addTrack(track)
-
-            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=offer_type))
-            answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
-
-            if pc.iceGatheringState != 'complete':
-                gather_complete = asyncio.Event()
-
-                @pc.on('icegatheringstatechange')
-                async def on_ice_gathering_state_change():
-                    if pc.iceGatheringState == 'complete':
-                        gather_complete.set()
-
-                await gather_complete.wait()
-
-            return {
-                'status': 'ok',
-                'sdp': pc.localDescription.sdp,
-                'type': pc.localDescription.type,
-            }
-
-        try:
-            result = run_webrtc(handle_offer())
-            return jsonify(result)
-        except Exception as exc:
-            return jsonify({'status': 'error', 'message': f'webrtc offer failed: {exc}'}), 500
+        return jsonify({
+            'status': 'error',
+            'message': 'server-side WebRTC offer is deprecated; use /api/session/stream and connect to MediaMTX WHEP',
+        }), 410
 
     @app.route('/admin', methods=['GET', 'POST'])
     def admin():
@@ -980,13 +854,64 @@ def create_app(test_config=None):
 
     @app.route('/api/control', methods=['POST'])
     def api_control():
+        if 'user_id' not in session:
+            return jsonify({'status': 'error', 'message': 'unauthorized'}), 401
+
+        active_session = get_active_session(session['user_id'])
+        if not active_session:
+            return jsonify({'status': 'error', 'message': 'no active session'}), 409
+
         payload = request.get_json(silent=True) or {}
-        action = payload.get('action')
+        action = (payload.get('action') or '').strip().lower()
         if not action:
             return jsonify({'status': 'error', 'message': 'action is required'}), 400
 
-        pending_commands.put(action)
-        return jsonify({'status': 'ok', 'action': action})
+        if action not in {'forward', 'back', 'left', 'right', 'stop', 'lights_on', 'lights_off'}:
+            return jsonify({'status': 'error', 'message': 'invalid action'}), 400
+
+        board_name = active_session['name']
+        dropped_oldest = put_command(board_name, action)
+        return jsonify({'status': 'ok', 'action': action, 'board_name': board_name, 'dropped_oldest': dropped_oldest})
+
+    @sock.route('/ws/board/commands')
+    def board_command_ws(ws):
+        token = request.args.get('token')
+        if token != app.config['BOARD_TOKEN']:
+            try:
+                ws.send(json.dumps({'status': 'error', 'message': 'invalid token'}))
+            except Exception:
+                pass
+            return
+
+        board_name = normalize_board_name(resolve_board_name())
+        if not board_name:
+            try:
+                ws.send(json.dumps({'status': 'error', 'message': 'board_name is required'}))
+            except Exception:
+                pass
+            return
+
+        mark_board_activity_for_device('command_ws_connect', board_name)
+        command_queue = get_command_queue(board_name)
+
+        while True:
+            try:
+                action = command_queue.get(timeout=1.0)
+            except Empty:
+                action = None
+
+            payload = {
+                'status': 'ok',
+                'action': action,
+                'board_name': board_name,
+                'keepalive': action is None,
+            }
+            try:
+                ws.send(json.dumps(payload))
+            except (ConnectionClosed, BrokenPipeError):
+                break
+            except Exception:
+                break
 
     @app.route('/api/board/command')
     def board_command():
@@ -994,13 +919,17 @@ def create_app(test_config=None):
         if token != app.config['BOARD_TOKEN']:
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
-        mark_board_activity_for_device('command_poll', resolve_board_name())
+        board_name = normalize_board_name(resolve_board_name())
+        if not board_name:
+            return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
+
+        mark_board_activity_for_device('command_poll', board_name)
 
         try:
-            action = pending_commands.get_nowait()
+            action = get_command_queue(board_name).get_nowait()
         except Empty:
-            return jsonify({'status': 'ok', 'action': None})
-        return jsonify({'status': 'ok', 'action': action})
+            return jsonify({'status': 'ok', 'action': None, 'board_name': board_name})
+        return jsonify({'status': 'ok', 'action': action, 'board_name': board_name})
 
     @app.route('/api/board/stream/status')
     def board_stream_status():
@@ -1008,7 +937,7 @@ def create_app(test_config=None):
         if token != app.config['BOARD_TOKEN']:
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
-        board_name = resolve_board_name()
+        board_name = normalize_board_name(resolve_board_name())
         mark_board_activity_for_device('stream_status_poll', board_name)
 
         db = get_db()
@@ -1025,9 +954,51 @@ def create_app(test_config=None):
                 """,
                 (board_name,),
             ).fetchone()
+            stream_urls = build_stream_urls(board_name)
         else:
             active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
-        return jsonify({'status': 'ok', 'enabled': active_row is not None, 'board_active': is_board_active()})
+            stream_urls = {'path': None, 'whep_url': None, 'rtsp_url': None}
+        return jsonify({
+            'status': 'ok',
+            'enabled': active_row is not None,
+            'board_active': is_board_active(),
+            'board_name': board_name,
+            'stream_path': stream_urls['path'],
+            'whep_url': stream_urls['whep_url'],
+            'rtsp_url': stream_urls['rtsp_url'],
+        })
+
+    @app.route('/api/board/stream/config')
+    def board_stream_config():
+        token = request.args.get('token')
+        if token != app.config['BOARD_TOKEN']:
+            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
+
+        board_name = normalize_board_name(resolve_board_name())
+        if not board_name:
+            return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
+
+        db = get_db()
+        active_row = db.execute(
+            """
+            SELECT s.id
+            FROM sessions s
+            JOIN devices d ON d.id = s.device_id
+            WHERE s.status = 'active' AND d.name = ?
+            ORDER BY s.id DESC
+            LIMIT 1
+            """,
+            (board_name,),
+        ).fetchone()
+        stream_urls = build_stream_urls(board_name)
+        return jsonify({
+            'status': 'ok',
+            'enabled': active_row is not None,
+            'board_name': board_name,
+            'stream_path': stream_urls['path'],
+            'whep_url': stream_urls['whep_url'],
+            'rtsp_url': stream_urls['rtsp_url'],
+        })
 
     @app.route('/api/board/status')
     def board_status():
@@ -1044,110 +1015,83 @@ def create_app(test_config=None):
 
     @app.route('/api/stream/chunk', methods=['POST'])
     def api_stream_chunk():
-        nonlocal latest_stream_chunk
+        board_name = normalize_board_name(resolve_board_name())
+        if not board_name and 'user_id' in session:
+            active_session = get_active_session(session['user_id'])
+            if active_session:
+                board_name = active_session['name']
         data = request.get_data()
         if not data:
             return jsonify({'status': 'error', 'message': 'chunk data is required'}), 400
 
-        mark_stream_activity()
-        latest_stream_chunk = data
-        if stream_queue.full():
-            try:
-                stream_queue.get_nowait()
-            except Empty:
-                pass
-        stream_queue.put(data)
-        return jsonify({'status': 'ok', 'received': len(data)})
+        mark_stream_activity(board_name)
+        set_latest_stream_chunk(board_name, data)
+        if board_name:
+            mark_board_activity_for_device('stream_chunk', board_name)
+        return jsonify({'status': 'ok', 'received': len(data), 'board_name': board_name or default_board_name})
 
     @app.route('/api/video/pipeline/frame', methods=['POST'])
     def api_video_pipeline_frame():
-        nonlocal latest_stream_chunk, pipeline_frame_counter
-        board_name = resolve_board_name()
+        nonlocal pipeline_frame_counter
+        board_name = normalize_board_name(resolve_board_name())
+        if not board_name and 'user_id' in session:
+            active_session = get_active_session(session['user_id'])
+            if active_session:
+                board_name = active_session['name']
         data = request.get_data()
         if not data:
             return jsonify({'status': 'error', 'message': 'frame data is required'}), 400
 
         ingest_started = time.monotonic()
-        mark_stream_activity()
+        mark_stream_activity(board_name)
         if board_name:
             mark_board_activity_for_device('pipeline_frame', board_name)
         pipeline_frame_counter += 1
-        latest_stream_chunk = data
-        if stream_queue.full():
-            try:
-                stream_queue.get_nowait()
-            except Empty:
-                pass
-        stream_queue.put(data)
+        set_latest_stream_chunk(board_name, data)
         if app.config['STREAM_PROFILE'] and (pipeline_frame_counter <= 3 or pipeline_frame_counter % 30 == 0):
             app.logger.info(
                 'stream profile ingest=frame frame_id=%s bytes=%s queue=%s ingest_ms=%.1f',
                 pipeline_frame_counter,
                 len(data),
-                stream_queue.qsize(),
+                get_stream_state(board_name)['stream_queue'].qsize(),
                 (time.monotonic() - ingest_started) * 1000.0,
             )
-        return jsonify({'status': 'ok', 'received': len(data), 'frame_id': pipeline_frame_counter})
+        return jsonify({'status': 'ok', 'received': len(data), 'frame_id': pipeline_frame_counter, 'board_name': board_key(board_name)})
 
     @app.route('/api/video/h264/chunk', methods=['POST'])
     def api_video_h264_chunk():
-        board_name = resolve_board_name()
+        return jsonify({
+            'status': 'error',
+            'message': 'deprecated: publish H264 directly to MediaMTX (RTSP/SRT) and use WHEP for playback',
+        }), 410
 
-        token = request.headers.get('X-Board-Token', '')
-        if token != app.config['BOARD_TOKEN']:
-            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
-
-        data = request.get_data()
-        if not data:
-            return jsonify({'status': 'error', 'message': 'chunk data is required'}), 400
-
-        if h264_decoder is None or cv2 is None:
-            return jsonify({'status': 'error', 'message': 'h264 decode not available'}), 503
-
-        enqueue_started = time.monotonic()
-        mark_stream_activity()
-        if board_name:
-            mark_board_activity_for_device('h264_chunk', board_name)
-        dropped_oldest = False
-        try:
-            h264_ingest_queue.put_nowait(data)
-        except Full:
-            try:
-                h264_ingest_queue.get_nowait()
-                dropped_oldest = True
-            except Empty:
-                pass
-            try:
-                h264_ingest_queue.put_nowait(data)
-            except Full:
-                pass
-
-        enqueue_ms = (time.monotonic() - enqueue_started) * 1000.0
-        if app.config['STREAM_PROFILE'] and enqueue_ms >= 20.0:
-            app.logger.info(
-                'stream profile ingest=h264 enqueue_ms=%.1f bytes=%s backlog=%s dropped_oldest=%s',
-                enqueue_ms,
-                len(data),
-                h264_ingest_queue.qsize(),
-                dropped_oldest,
-            )
-
-        return jsonify({'status': 'ok', 'queued': h264_ingest_queue.qsize(), 'dropped_oldest': dropped_oldest})
+    def resolve_feed_board_name():
+        candidate = normalize_board_name(request.args.get('board_name'))
+        if candidate:
+            return candidate
+        if 'user_id' in session:
+            active_session = get_active_session(session['user_id'])
+            if active_session:
+                return active_session['name']
+        return None
 
     @app.route('/video_feed')
     def video_feed():
         mode = request.args.get('mode', 'stream')
+        board_name = resolve_feed_board_name()
+        stream_state = get_stream_state(board_name)
 
         def generate_stream():
             while True:
                 try:
-                    chunk = get_latest_stream_chunk()
+                    chunk = get_latest_stream_chunk(board_name)
                 except Empty:
                     continue
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + chunk + b'\r\n')
 
         if mode == 'single':
+            latest_stream_chunk = stream_state['latest_stream_chunk']
             if latest_stream_chunk is None:
                 return Response(b'', status=204, mimetype='application/octet-stream')
             return Response(latest_stream_chunk, mimetype='image/jpeg')
@@ -1156,10 +1100,12 @@ def create_app(test_config=None):
 
     @app.route('/video/pipeline/stream')
     def video_pipeline_stream():
+        board_name = resolve_feed_board_name()
+
         def generate_stream():
             while True:
                 try:
-                    chunk = get_latest_stream_chunk()
+                    chunk = get_latest_stream_chunk(board_name)
                 except Empty:
                     continue
                 yield (b'--frame\r\n'

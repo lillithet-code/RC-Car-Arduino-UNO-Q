@@ -80,6 +80,7 @@
     const remainingTime = document.getElementById('remaining-time');
     const streamMjpegBaseUrl = '{{ url_for('video_feed') }}';
     const streamRefreshIntervalMs = 500;
+    const commandHeartbeatIntervalMs = 120;
     let dragging = false;
     let streamLive = false;
     let streamReady = false;
@@ -91,10 +92,12 @@
     let startRequestInFlight = false;
     let fallbackFrameRendered = false;
     let visibilityRequestInFlight = false;
+    let currentDriveAction = 'stop';
 
     function hideStreamSurfaces() {
       if (streamVideo) {
         streamVideo.style.display = 'none';
+        streamVideo.srcObject = null;
       }
       if (streamImage) {
         streamImage.style.display = 'none';
@@ -103,6 +106,30 @@
         }
       }
       fallbackFrameRendered = false;
+    }
+
+    async function closePeerConnection() {
+      if (!peerConnection) {
+        return;
+      }
+      try {
+        peerConnection.getSenders().forEach((sender) => {
+          if (sender.track) {
+            sender.track.stop();
+          }
+        });
+        peerConnection.getReceivers().forEach((receiver) => {
+          if (receiver.track) {
+            receiver.track.stop();
+          }
+        });
+        peerConnection.close();
+      } catch (error) {
+        // Ignore close errors.
+      }
+      peerConnection = null;
+      usingWebRTC = false;
+      activeStreamId = null;
     }
 
     function formatSeconds(totalSeconds) {
@@ -231,6 +258,33 @@
       }
     }
 
+    async function fetchSessionStreamConfig() {
+      const response = await fetch('/api/session/stream', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(`stream config failed (${response.status})`);
+      }
+      const payload = await response.json();
+      if (payload.status !== 'ok' || !payload.whep_url) {
+        throw new Error(payload.message || 'whep_url unavailable');
+      }
+      return payload;
+    }
+
+    function waitForIceGatheringComplete(pc) {
+      if (pc.iceGatheringState === 'complete') {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        const checkState = () => {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', checkState);
+            resolve();
+          }
+        };
+        pc.addEventListener('icegatheringstatechange', checkState);
+      });
+    }
+
     async function setupWebRTC() {
       if (!window.RTCPeerConnection || !streamVideo) {
         enableMjpegFallback();
@@ -238,24 +292,12 @@
       }
 
       try {
-        peerConnection = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
+        await closePeerConnection();
 
-        const waitForIceGatheringComplete = (pc) => {
-          if (pc.iceGatheringState === 'complete') {
-            return Promise.resolve();
-          }
-          return new Promise((resolve) => {
-            const checkState = () => {
-              if (pc.iceGatheringState === 'complete') {
-                pc.removeEventListener('icegatheringstatechange', checkState);
-                resolve();
-              }
-            };
-            pc.addEventListener('icegatheringstatechange', checkState);
-          });
-        };
+        const streamConfig = await fetchSessionStreamConfig();
+        peerConnection = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        });
 
         peerConnection.addTransceiver('video', { direction: 'recvonly' });
         peerConnection.ontrack = (event) => {
@@ -302,34 +344,22 @@
         await peerConnection.setLocalDescription(offer);
         await waitForIceGatheringComplete(peerConnection);
 
-        const response = await fetch('/api/webrtc/offer', {
+        const response = await fetch(streamConfig.whep_url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sdp: peerConnection.localDescription.sdp,
-            type: peerConnection.localDescription.type,
-          }),
+          headers: { 'Content-Type': 'application/sdp' },
+          body: peerConnection.localDescription.sdp,
         });
 
         if (!response.ok) {
-          let detail = '';
-          try {
-            const errorPayload = await response.json();
-            detail = errorPayload.message || '';
-          } catch (error) {
-            detail = '';
-          }
+          const detail = await response.text();
           throw new Error(`WebRTC offer failed (${response.status}) ${detail}`.trim());
         }
 
-        const answer = await response.json();
-        if (answer.status !== 'ok' || !answer.sdp || !answer.type) {
-          throw new Error('Invalid WebRTC answer');
-        }
-
-        await peerConnection.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
+        const answerSdp = await response.text();
+        await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
       } catch (error) {
         console.warn('WebRTC setup failed, using MJPEG fallback:', error);
+        await closePeerConnection();
         enableMjpegFallback();
       }
     }
@@ -352,6 +382,7 @@
         billingStarted = Boolean(payload.billing_started);
 
         if (!hasActiveSession || !streamReady) {
+          await closePeerConnection();
           hideStreamSurfaces();
         } else if (usingWebRTC) {
           if (streamVideo) {
@@ -368,8 +399,11 @@
           streamImage.src = streamMjpegBaseUrl;
         }
 
-        if (!usingWebRTC && hasActiveSession && streamReady) {
-          maybeStartSessionBilling();
+        if (hasActiveSession && streamReady && !usingWebRTC) {
+          await setupWebRTC();
+          if (!usingWebRTC) {
+            maybeStartSessionBilling();
+          }
         }
 
         if (!hasActiveSession && joystick) {
@@ -401,12 +435,16 @@
       setInterval(postStreamVisibility, 1000);
     }
 
-    function sendAction(action) {
+    function sendAction(action, force = false) {
+      currentDriveAction = action;
+      if (!force && action === 'stop' && !dragging) {
+        return;
+      }
       fetch('/api/control', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ action })
-      });
+      }).catch(() => {});
     }
 
     function updateFromPointer(x, y) {
@@ -444,15 +482,24 @@
       dragging = false;
       knob.style.left = '75px';
       knob.style.top = '75px';
-      sendAction('stop');
+      sendAction('stop', true);
       });
       joystick.addEventListener('pointercancel', () => {
       dragging = false;
       knob.style.left = '75px';
       knob.style.top = '75px';
-      sendAction('stop');
+      sendAction('stop', true);
       });
     }
+
+    setInterval(() => {
+      if (!hasActiveSession) {
+        return;
+      }
+      if (dragging && currentDriveAction !== 'stop') {
+        sendAction(currentDriveAction, true);
+      }
+    }, commandHeartbeatIntervalMs);
   </script>
 </body>
 </html>

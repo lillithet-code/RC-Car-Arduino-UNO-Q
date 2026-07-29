@@ -1,118 +1,41 @@
 #!/usr/bin/env python3
-import json
-import http.client
 import glob
+import json
 import os
-import queue
 import re
-import select
+import socket
 import subprocess
 import sys
-import threading
 import time
-import ssl
-import socket
-from urllib import request as urllib_request
 from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 import cv2
 
 
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
-SERVER_BASE_PARTS = urllib_parse.urlparse(SERVER_BASE_URL)
-SERVER_SCHEME = SERVER_BASE_PARTS.scheme or 'https'
-SERVER_HOST = SERVER_BASE_PARTS.hostname or SERVER_BASE_PARTS.path
-SERVER_PORT = SERVER_BASE_PARTS.port or (443 if SERVER_SCHEME == 'https' else 80)
-STREAM_ENDPOINT = f'{SERVER_BASE_URL}/api/video/pipeline/frame'
-STREAM_H264_ENDPOINT = f'{SERVER_BASE_URL}/api/video/h264/chunk'
-STREAM_STATUS_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/status'
 BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
 BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
+BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
 VIDEO_DEVICE_SETTING = os.environ.get('VIDEO_DEVICE', 'auto').strip().lower()
 VIDEO_DEVICE_AUTO_RECOVER = os.environ.get('VIDEO_DEVICE_AUTO_RECOVER', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
-FRAME_RATE = float(os.environ.get('FRAME_RATE', '25'))
-QUALITY = int(os.environ.get('JPEG_QUALITY', '70'))
-UPLOAD_TIMEOUT_SECONDS = float(os.environ.get('UPLOAD_TIMEOUT_SECONDS', '5.0'))
-STREAM_MODE = os.environ.get('STREAM_MODE', 'hardware').strip().lower()
-VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1280'))
-VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
-CAMERA_FOURCC = os.environ.get('CAMERA_FOURCC', 'MJPG').strip().upper()
-CAPTURE_BUFFER_SIZE = int(os.environ.get('CAPTURE_BUFFER_SIZE', '1'))
-STREAM_IDLE_POLL_SECONDS = float(os.environ.get('STREAM_IDLE_POLL_SECONDS', '2.0'))
-STREAM_STATUS_POLL_SECONDS = max(0.2, float(os.environ.get('STREAM_STATUS_POLL_SECONDS', '1.0')))
-STREAM_STATUS_FAILURE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_STATUS_FAILURE_GRACE_SECONDS', '20.0')))
+FRAME_RATE = float(os.environ.get('FRAME_RATE', '30'))
+VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1920'))
+VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '1080'))
+STREAM_STATUS_POLL_SECONDS = max(0.3, float(os.environ.get('STREAM_STATUS_POLL_SECONDS', '1.0')))
 STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
-STREAM_PIPELINE = os.environ.get('STREAM_PIPELINE', 'auto').strip().lower()
+VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
+H264_ENCODER = os.environ.get('H264_ENCODER', 'libx264').strip()
 H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
-H264_CHUNK_BYTES = int(os.environ.get('H264_CHUNK_BYTES', '65536'))
-H264_INPUT_FORMATS = os.environ.get('H264_INPUT_FORMATS', '').strip()
-H264_ENCODER_MODE = os.environ.get('H264_ENCODER_MODE', 'auto').strip().lower()
-H264_ENCODERS = os.environ.get('H264_ENCODERS', 'h264_v4l2m2m,h264_omx').strip()
-H264_UPLOAD_BATCH_BYTES = int(os.environ.get('H264_UPLOAD_BATCH_BYTES', '65536'))
-H264_UPLOAD_MIN_FLUSH_BYTES = int(os.environ.get('H264_UPLOAD_MIN_FLUSH_BYTES', '16384'))
-H264_UPLOAD_MAX_DELAY_MS = int(os.environ.get('H264_UPLOAD_MAX_DELAY_MS', '40'))
-H264_UPLOAD_QUEUE_MAX = max(1, int(os.environ.get('H264_UPLOAD_QUEUE_MAX', '3')))
-H264_UPLOAD_COALESCE_MAX_BYTES = max(1024, int(os.environ.get('H264_UPLOAD_COALESCE_MAX_BYTES', '262144')))
-H264_UPLOAD_COALESCE_MIN_BYTES = max(1024, int(os.environ.get('H264_UPLOAD_COALESCE_MIN_BYTES', '32768')))
-H264_UPLOAD_COALESCE_START_BYTES = max(1024, int(os.environ.get('H264_UPLOAD_COALESCE_START_BYTES', '65536')))
-H264_UPLOAD_ADAPTIVE_COALESCE = os.environ.get('H264_UPLOAD_ADAPTIVE_COALESCE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
-H264_UPLOAD_ADAPT_TARGET_MS = max(20.0, float(os.environ.get('H264_UPLOAD_ADAPT_TARGET_MS', '140.0')))
-H264_STARTUP_TIMEOUT_SECONDS = max(1.0, float(os.environ.get('H264_STARTUP_TIMEOUT_SECONDS', '4.0')))
-H264_STALL_TIMEOUT_SECONDS = max(2.0, float(os.environ.get('H264_STALL_TIMEOUT_SECONDS', '6.0')))
-VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
-H264_UPLOAD_RETRY_ONCE = os.environ.get('H264_UPLOAD_RETRY_ONCE', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
-H264_UPLOAD_PROFILE_MS = max(0.0, float(os.environ.get('H264_UPLOAD_PROFILE_MS', '120.0')))
-H264_LOW_LATENCY_FLAGS = os.environ.get('H264_LOW_LATENCY_FLAGS', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
-STREAM_PROFILE = os.environ.get('STREAM_PROFILE', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
-STREAM_PROFILE_EVERY = max(1, int(os.environ.get('STREAM_PROFILE_EVERY', '30')))
-STREAM_PROFILE_HEARTBEAT_POLLS = max(1, int(os.environ.get('STREAM_PROFILE_HEARTBEAT_POLLS', '20')))
-_UPLOAD_CONNECTION = None
-_UPLOAD_CONNECTION_KEY = None
+H264_INPUT_FORMAT = os.environ.get('H264_INPUT_FORMAT', 'mjpeg').strip().lower()
+PUBLISH_RTSP_URL = os.environ.get('MEDIAMTX_RTSP_URL', '').strip()
 
-INPUT_FORMAT_ALIASES = {
-    'mjpg': 'mjpeg',
-    'mjpeg': 'mjpeg',
-    'yuyv': 'yuyv422',
-    'yuyv422': 'yuyv422',
-    'uyvy': 'uyvy422',
-    'uyvy422': 'uyvy422',
-}
-
-
-def normalize_input_format(value):
-    raw = (value or '').strip().lower()
-    return INPUT_FORMAT_ALIASES.get(raw, raw)
-
-
-def get_available_h264_encoders():
-    try:
-        result = subprocess.run(
-            [FFMPEG_BIN, '-hide_banner', '-encoders'],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        output = result.stdout or ''
-    except Exception:
-        return set()
-
-    available = set()
-    for line in output.splitlines():
-        line = line.strip()
-        if not line or line.startswith('Encoders:'):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        encoder_name = parts[1].strip()
-        if encoder_name.startswith('h264_'):
-            available.add(encoder_name)
-    return available
+STREAM_CONFIG_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/config'
+DEVICE_REGISTER_ENDPOINT = f'{SERVER_BASE_URL}/api/devices/register'
 
 
 def parse_video_device_setting(value):
@@ -135,38 +58,9 @@ def list_video_device_indices():
     indices = []
     for path in paths:
         match = re.match(r'^/dev/video(\d+)$', path)
-        if not match:
-            continue
-        index = int(match.group(1))
-        # Skip known codec-only nodes (encoder/decoder) to avoid false camera probes.
-        name_path = f'/sys/class/video4linux/video{index}/name'
-        try:
-            with open(name_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                node_name = handle.read().strip().lower()
-            if any(token in node_name for token in ('encoder', 'decoder', 'codec')):
-                continue
-        except Exception:
-            pass
-        indices.append(index)
+        if match:
+            indices.append(int(match.group(1)))
     return indices
-
-
-def stop_h264_process(process, reason):
-    if process is None:
-        return
-
-    try:
-        process.terminate()
-        process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        print(f'h264 process did not stop quickly ({reason}); killing', file=sys.stderr)
-        process.kill()
-        try:
-            process.wait(timeout=1.0)
-        except Exception:
-            pass
-    except Exception as exc:
-        print(f'h264 process stop error ({reason}): {exc}', file=sys.stderr)
 
 
 def probe_video_device(device_index):
@@ -197,739 +91,176 @@ def resolve_working_video_device(preferred_index=None):
             continue
         if probe_video_device(index):
             return index
-
     return None
 
 
-def classify_camera_error(stderr_output):
-    normalized_error = (stderr_output or '').lower()
-    if any(marker in normalized_error for marker in ('device or resource busy', 'resource busy')):
-        return 'busy'
-    if any(marker in normalized_error for marker in ('not a video capture device', 'no such device', 'error opening input')):
-        return 'missing'
-    return 'other'
-
-
-def get_h264_encoders():
-    values = [item.strip() for item in H264_ENCODERS.split(',') if item.strip()]
-    if not values:
-        return ['h264_v4l2m2m']
-
-    available = get_available_h264_encoders()
-    if not available:
-        return values
-
-    filtered = [encoder for encoder in values if encoder in available]
-    if filtered:
-        return filtered
-    return values
-
-
-def get_h264_input_formats():
-    if H264_INPUT_FORMATS:
-        values = [normalize_input_format(item) for item in H264_INPUT_FORMATS.split(',') if item.strip()]
-        if values:
-            return values
-
-    # Prefer raw formats first for faster and more stable HW encoder startup.
-    defaults = ['yuyv422', 'uyvy422', normalize_input_format(CAMERA_FOURCC)]
-    ordered = []
-    for item in defaults:
-        if item not in ordered:
-            ordered.append(item)
-    return ordered
-
-
-def open_capture(device_index):
-    backend = cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else 0
-    cap = cv2.VideoCapture(device_index, backend)
-    if not cap.isOpened():
-        return cap
-
-    # Ask camera for low-latency V4L2 settings first.
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, max(1, CAPTURE_BUFFER_SIZE))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, VIDEO_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, FRAME_RATE)
-
-    if STREAM_MODE in {'hardware', 'auto'}:
-        fourcc = cv2.VideoWriter_fourcc(*CAMERA_FOURCC)
-        cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-
-    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    actual_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
-    actual_fourcc_raw = int(cap.get(cv2.CAP_PROP_FOURCC) or 0)
-    actual_fourcc = ''.join(chr((actual_fourcc_raw >> 8 * i) & 0xFF) for i in range(4)).strip() or '????'
-    print(
-        f'capture configured mode={STREAM_MODE} device={device_index} '
-        f'{actual_width}x{actual_height}@{actual_fps:.2f} fourcc={actual_fourcc}'
+def register_device():
+    payload = json.dumps({
+        'name': BOARD_NAME,
+        'kind': 'arduino',
+        'location': BOARD_LOCATION,
+    }).encode('utf-8')
+    req = urllib_request.Request(
+        DEVICE_REGISTER_ENDPOINT,
+        data=payload,
+        headers={'Content-Type': 'application/json', 'User-Agent': 'RC-Car-Board-Stream/2.0'},
+        method='POST',
     )
-
-    return cap
-
-
-def fetch_stream_enabled():
-    board_name = urllib_parse.quote(BOARD_NAME, safe='')
-    url = f'{STREAM_STATUS_ENDPOINT}?token={BOARD_TOKEN}&board_name={board_name}'
-    req = urllib_request.Request(url, headers={'User-Agent': 'RC-Car-Board-Stream/1.0'})
     try:
-        with urllib_request.urlopen(req, timeout=max(UPLOAD_TIMEOUT_SECONDS, 1.0)) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-        return bool(payload.get('enabled', False))
+        with urllib_request.urlopen(req, timeout=3):
+            return True
     except Exception as exc:
-        print(f'stream status check failed: {exc}', file=sys.stderr)
+        print(f'device register failed: {exc}', file=sys.stderr)
+        return False
+
+
+def fetch_stream_config():
+    board_name = urllib_parse.quote(BOARD_NAME, safe='')
+    token = urllib_parse.quote(BOARD_TOKEN, safe='')
+    url = f'{STREAM_CONFIG_ENDPOINT}?token={token}&board_name={board_name}'
+    req = urllib_request.Request(url, headers={'User-Agent': 'RC-Car-Board-Stream/2.0'})
+    try:
+        with urllib_request.urlopen(req, timeout=3) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        if payload.get('status') != 'ok':
+            raise RuntimeError(f'unexpected stream config response: {payload}')
+        return payload
+    except Exception as exc:
+        print(f'stream config check failed: {exc}', file=sys.stderr)
         return None
 
 
-def fetch_stream_enabled_profiled(poll_count):
-    enabled = fetch_stream_enabled()
-    if STREAM_PROFILE and (poll_count <= 3 or poll_count % STREAM_PROFILE_HEARTBEAT_POLLS == 0):
-        print(f'stream profile gate poll={poll_count} enabled={enabled}')
-    return enabled
-
-
-def post_bytes(url, payload, content_type):
-    global _UPLOAD_CONNECTION, _UPLOAD_CONNECTION_KEY
-
-    parsed = urllib_parse.urlparse(url)
-    request_path = parsed.path or '/'
-    if parsed.query:
-        request_path = f'{request_path}?{parsed.query}'
-
-    connection_key = (parsed.scheme or SERVER_SCHEME, parsed.hostname or SERVER_HOST, parsed.port or SERVER_PORT)
-    if _UPLOAD_CONNECTION is None or _UPLOAD_CONNECTION_KEY != connection_key:
-        if _UPLOAD_CONNECTION is not None:
-            try:
-                _UPLOAD_CONNECTION.close()
-            except Exception:
-                pass
-        timeout = max(UPLOAD_TIMEOUT_SECONDS, 1.0)
-        if connection_key[0] == 'https':
-            _UPLOAD_CONNECTION = http.client.HTTPSConnection(
-                connection_key[1],
-                connection_key[2],
-                timeout=timeout,
-                context=ssl.create_default_context(),
-            )
-        else:
-            _UPLOAD_CONNECTION = http.client.HTTPConnection(
-                connection_key[1],
-                connection_key[2],
-                timeout=timeout,
-            )
-        _UPLOAD_CONNECTION_KEY = connection_key
-
-    headers = {
-        'Content-Type': content_type,
-        'Content-Length': str(len(payload)),
-        'Connection': 'keep-alive',
-        'X-Board-Token': BOARD_TOKEN,
-        'X-Board-Name': BOARD_NAME,
-    }
+def stop_publisher(process, reason):
+    if process is None:
+        return
 
     try:
-        _UPLOAD_CONNECTION.request('POST', request_path, body=payload, headers=headers)
-        response = _UPLOAD_CONNECTION.getresponse()
-        response.read()
-        if response.status >= 400:
-            raise RuntimeError(f'upload returned HTTP {response.status}')
-    except Exception:
+        process.terminate()
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        print(f'publisher did not stop quickly ({reason}); killing', file=sys.stderr)
+        process.kill()
         try:
-            _UPLOAD_CONNECTION.close()
+            process.wait(timeout=1.0)
         except Exception:
             pass
-        _UPLOAD_CONNECTION = None
-        _UPLOAD_CONNECTION_KEY = None
-        raise
+    except Exception as exc:
+        print(f'publisher stop error ({reason}): {exc}', file=sys.stderr)
 
 
-def post_h264_with_retry(payload):
-    started = time.monotonic()
-    attempts = 0
-    last_error = None
-    max_attempts = 2 if H264_UPLOAD_RETRY_ONCE else 1
-
-    while attempts < max_attempts:
-        attempts += 1
-        try:
-            post_bytes(STREAM_H264_ENDPOINT, payload, 'video/h264')
-            elapsed_ms = (time.monotonic() - started) * 1000.0
-            if H264_UPLOAD_PROFILE_MS > 0 and elapsed_ms >= H264_UPLOAD_PROFILE_MS:
-                print(
-                    f'h264 upload slow bytes={len(payload)} attempts={attempts} elapsed_ms={elapsed_ms:.1f}',
-                    file=sys.stderr,
-                )
-            return True, elapsed_ms, attempts
-        except Exception as exc:
-            last_error = exc
-            if attempts < max_attempts:
-                print(
-                    f'h264 upload retrying after transient failure attempt={attempts} error={exc}',
-                    file=sys.stderr,
-                )
-
-    if last_error is not None:
-        print(f'H264 upload failed: {last_error}', file=sys.stderr)
-    return False, None, attempts
-
-
-def enqueue_h264_payload(upload_queue, payload):
-    if not payload:
-        return
-
-    try:
-        upload_queue.put_nowait(payload)
-        return
-    except queue.Full:
-        pass
-
-    # Latency-first behavior: drop the oldest batch when network is backpressured.
-    try:
-        upload_queue.get_nowait()
-    except queue.Empty:
-        pass
-
-    try:
-        upload_queue.put_nowait(payload)
-    except queue.Full:
-        pass
-
-
-def h264_upload_worker(upload_queue, stop_event):
-    min_coalesce = min(H264_UPLOAD_COALESCE_MIN_BYTES, H264_UPLOAD_COALESCE_MAX_BYTES)
-    max_coalesce = max(min_coalesce, H264_UPLOAD_COALESCE_MAX_BYTES)
-    current_coalesce = max(min_coalesce, min(H264_UPLOAD_COALESCE_START_BYTES, max_coalesce))
-
-    while not stop_event.is_set() or not upload_queue.empty():
-        try:
-            payload = upload_queue.get(timeout=0.2)
-        except queue.Empty:
-            continue
-
-        # Merge adjacent queued buffers into a larger contiguous upload.
-        # This lowers HTTP request overhead and preserves stream continuity.
-        merged = bytearray(payload)
-        while len(merged) < current_coalesce:
-            try:
-                extra = upload_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            if not extra:
-                continue
-            merged.extend(extra)
-
-        payload = bytes(merged)
-        before_upload_backlog = upload_queue.qsize()
-        ok, elapsed_ms, attempts = post_h264_with_retry(payload)
-
-        if not H264_UPLOAD_ADAPTIVE_COALESCE or elapsed_ms is None:
-            continue
-
-        new_coalesce = current_coalesce
-        high_ms = H264_UPLOAD_ADAPT_TARGET_MS * 1.20
-        low_ms = H264_UPLOAD_ADAPT_TARGET_MS * 0.70
-
-        if (before_upload_backlog > 0 and elapsed_ms >= H264_UPLOAD_ADAPT_TARGET_MS) or attempts > 1 or (not ok):
-            new_coalesce = min(max_coalesce, int(current_coalesce * 1.25))
-        elif elapsed_ms <= low_ms and before_upload_backlog == 0:
-            new_coalesce = max(min_coalesce, int(current_coalesce * 0.85))
-        elif elapsed_ms >= high_ms and before_upload_backlog > 0:
-            new_coalesce = min(max_coalesce, int(current_coalesce * 1.10))
-
-        if new_coalesce != current_coalesce:
-            current_coalesce = new_coalesce
-            if STREAM_PROFILE:
-                print(
-                    f'stream profile path=h264_hw adaptive_coalesce bytes={current_coalesce} '
-                    f'elapsed_ms={elapsed_ms:.1f} backlog={before_upload_backlog} attempts={attempts}',
-                    file=sys.stderr,
-                )
-
-
-def log_profile_summary(*, path, event_count, total_elapsed, read_elapsed=None, post_elapsed=None, encode_elapsed=None, upload_bytes=None, extra=None):
-    if not STREAM_PROFILE or event_count <= 0:
-        return
-
-    rate = event_count / max(total_elapsed, 1e-6)
-    parts = [f'stream profile path={path}', f'events={event_count}', f'rate={rate:.2f}', f'total_ms={total_elapsed * 1000:.1f}']
-    if read_elapsed is not None:
-        parts.append(f'read_ms={read_elapsed * 1000:.1f}')
-    if encode_elapsed is not None:
-        parts.append(f'encode_ms={encode_elapsed * 1000:.1f}')
-    if post_elapsed is not None:
-        parts.append(f'post_ms={post_elapsed * 1000:.1f}')
-    if upload_bytes is not None:
-        parts.append(f'bytes={upload_bytes}')
-    if extra:
-        parts.append(extra)
-    print(' '.join(parts))
-
-
-def log_profile_event(*, path, message):
-    if STREAM_PROFILE:
-        print(f'stream profile path={path} {message}')
-
-
-def start_h264_ffmpeg(input_format, encoder_name, video_device_index):
-    if video_device_index is None:
-        raise RuntimeError('cannot start h264 pipeline without a valid video device index')
-
-    encoder_mode = H264_ENCODER_MODE
-    if encoder_mode not in {'auto', 'copy', 'transcode'}:
-        encoder_mode = 'auto'
-
-    effective_gop = max(1, min(H264_GOP, int(max(1, FRAME_RATE))))
-
-    use_copy = encoder_mode == 'copy' or (encoder_mode == 'auto' and input_format == 'h264')
-
+def build_publish_command(video_device_index, rtsp_url):
     command = [
         FFMPEG_BIN,
         '-hide_banner',
         '-loglevel', 'error',
         '-fflags', 'nobuffer',
         '-f', 'v4l2',
-        '-input_format', input_format,
+        '-input_format', H264_INPUT_FORMAT,
         '-video_size', f'{VIDEO_WIDTH}x{VIDEO_HEIGHT}',
         '-framerate', str(FRAME_RATE),
         '-i', f'/dev/video{video_device_index}',
         '-an',
+        '-c:v', H264_ENCODER,
+        '-g', str(max(1, H264_GOP)),
+        '-bf', '0',
+        '-b:v', H264_BITRATE,
+        '-maxrate', H264_MAXRATE,
+        '-bufsize', H264_BUFSIZE,
     ]
 
-    if use_copy:
-        command.extend([
-            '-c:v', 'copy',
-            '-f', 'h264',
-            '-',
-        ])
-    else:
-        low_latency_args = []
-        if H264_LOW_LATENCY_FLAGS:
-            low_latency_args = ['-tune', 'zerolatency']
+    if H264_ENCODER == 'libx264':
+        command.extend(['-preset', 'veryfast', '-tune', 'zerolatency'])
 
-        command.extend([
-            '-vf', 'format=nv12',
-            '-c:v', encoder_name,
-            '-pix_fmt', 'nv12',
-            '-g', str(effective_gop),
-            '-bf', '0',
-            *low_latency_args,
-            '-threads', '1',
-            '-bsf:v', 'dump_extra',
-            '-b:v', H264_BITRATE,
-            '-maxrate', H264_MAXRATE,
-            '-bufsize', H264_BUFSIZE,
-            '-f', 'h264',
-            '-',
-        ])
-        if H264_LOW_LATENCY_FLAGS:
-            command[1:1] = ['-flags', 'low_delay']
+    command.extend([
+        '-rtsp_transport', 'tcp',
+        '-f', 'rtsp',
+        rtsp_url,
+    ])
+    return command
 
-    mode_label = 'copy' if use_copy else 'transcode'
-    print(
-        f'starting h264 pipeline mode={mode_label} encoder={encoder_name} '
-        f'input_format={input_format}: {" ".join(command)}'
-    )
-    return subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0,
-    )
+
+def start_publisher(video_device_index, rtsp_url):
+    command = build_publish_command(video_device_index, rtsp_url)
+    print(f'starting MediaMTX publish: {" ".join(command)}')
+    return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
 def main():
-    cap = None
-    h264_process = None
-    frame_period = 1.0 / max(FRAME_RATE, 1)
-    profile_event_count = 0
-    profile_window_started = time.monotonic()
-    profile_read_elapsed = 0.0
-    profile_post_elapsed = 0.0
-    profile_encode_elapsed = 0.0
-    profile_upload_bytes = 0
-    last_enabled = None
-    h264_input_formats = get_h264_input_formats()
-    h264_input_index = 0
-    h264_encoders = get_h264_encoders()
-    h264_encoder_index = 0
-    selected_pipeline = STREAM_PIPELINE
-    if selected_pipeline == 'auto':
-        selected_pipeline = 'h264_hw'
-    if selected_pipeline not in {'h264_hw', 'h264_hw_strict', 'mjpg'}:
-        selected_pipeline = 'mjpg'
-    strict_hardware_only = selected_pipeline == 'h264_hw_strict'
+    register_device()
+
     preferred_video_device, auto_video_select = parse_video_device_setting(VIDEO_DEVICE_SETTING)
     active_video_device = resolve_working_video_device(preferred_video_device)
     print(
-        f'video device strategy: setting={VIDEO_DEVICE_SETTING} auto_select={auto_video_select} '
+        f'video device strategy setting={VIDEO_DEVICE_SETTING} auto_select={auto_video_select} '
         f'auto_recover={VIDEO_DEVICE_AUTO_RECOVER} active_device={active_video_device}'
     )
-    print(
-        f'selected stream pipeline: {selected_pipeline} '
-        f'h264_input_formats={"|".join(h264_input_formats)} '
-        f'h264_encoder_mode={H264_ENCODER_MODE} '
-        f'h264_encoders={"|".join(h264_encoders)}'
-    )
-    if selected_pipeline in {'h264_hw', 'h264_hw_strict'}:
-        print('stream profile path=h264_hw hardware_only_fallback=disabled')
-    if STREAM_PROFILE:
-        print(f'stream profiling enabled every={STREAM_PROFILE_EVERY}')
-        print(f'stream profiling heartbeat polls={STREAM_PROFILE_HEARTBEAT_POLLS}')
-    h264_failures = 0
-    h264_upload_buffer = bytearray()
-    h264_last_upload = time.monotonic()
-    h264_started_at = None
-    h264_last_chunk_at = None
-    h264_batch_bytes = max(1024, H264_UPLOAD_BATCH_BYTES)
-    h264_min_flush_bytes = max(1024, min(h264_batch_bytes, H264_UPLOAD_MIN_FLUSH_BYTES))
-    h264_max_delay = max(5, H264_UPLOAD_MAX_DELAY_MS) / 1000.0
-    h264_upload_queue = queue.Queue(maxsize=H264_UPLOAD_QUEUE_MAX)
-    h264_upload_stop = threading.Event()
-    h264_upload_thread = threading.Thread(
-        target=h264_upload_worker,
-        args=(h264_upload_queue, h264_upload_stop),
-        daemon=True,
-    )
-    h264_upload_thread.start()
-    next_video_probe_at = 0.0
-    stream_disabled_since = None
+
+    publisher_process = None
+    active_publish_url = None
     stream_enabled = False
-    next_status_poll_at = 0.0
-    last_status_success_at = 0.0
-    poll_count = 0
+    stream_disabled_since = None
+    next_probe_at = 0.0
 
     while True:
-        now_monotonic = time.monotonic()
-        if now_monotonic >= next_status_poll_at:
-            poll_count += 1
-            polled_enabled = fetch_stream_enabled_profiled(poll_count)
-            next_status_poll_at = now_monotonic + STREAM_STATUS_POLL_SECONDS
+        config = fetch_stream_config()
+        if config is not None:
+            stream_enabled = bool(config.get('enabled'))
+            configured_rtsp_url = (config.get('rtsp_url') or '').strip()
+            publish_url = PUBLISH_RTSP_URL or configured_rtsp_url
+        else:
+            publish_url = active_publish_url
 
-            if polled_enabled is None:
-                # Keep previous state for transient network/proxy failures.
-                if stream_enabled and last_status_success_at > 0:
-                    if (now_monotonic - last_status_success_at) > STREAM_STATUS_FAILURE_GRACE_SECONDS:
-                        stream_enabled = False
-                # If already disabled, remain disabled.
-            else:
-                stream_enabled = bool(polled_enabled)
-                last_status_success_at = now_monotonic
+        if stream_enabled:
+            stream_disabled_since = None
+        elif stream_disabled_since is None:
+            stream_disabled_since = time.monotonic()
 
-        if stream_enabled != last_enabled:
-            state_text = 'enabled' if stream_enabled else 'disabled'
-            print(f'stream state changed: {state_text}')
-            last_enabled = stream_enabled
-            if stream_enabled:
-                stream_disabled_since = None
-
-        if not stream_enabled:
-            now_monotonic = time.monotonic()
-            if stream_disabled_since is None:
-                stream_disabled_since = now_monotonic
-            disabled_for = now_monotonic - stream_disabled_since
-            if disabled_for < STREAM_DISABLE_GRACE_SECONDS:
-                time.sleep(0.2)
-                continue
-
-            if cap is not None:
-                cap.release()
-                cap = None
-                print('camera released while idle')
-            if h264_process is not None:
-                stop_h264_process(h264_process, 'idle')
-                h264_process = None
-                print('h264 encoder stopped while idle')
-            if h264_upload_buffer:
-                h264_upload_buffer.clear()
-            while True:
-                try:
-                    h264_upload_queue.get_nowait()
-                except queue.Empty:
-                    break
-            if STREAM_PROFILE and (poll_count <= 3 or poll_count % STREAM_PROFILE_HEARTBEAT_POLLS == 0):
-                log_profile_event(path=selected_pipeline, message='idle waiting_for_session')
-            time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
-            continue
-
-        if selected_pipeline in {'h264_hw', 'h264_hw_strict'}:
-            if h264_process is None:
-                try:
-                    now_monotonic = time.monotonic()
-                    should_probe = (
-                        active_video_device is None
-                        or auto_video_select
-                        or VIDEO_DEVICE_AUTO_RECOVER
-                    )
-                    if should_probe and now_monotonic >= next_video_probe_at:
-                        detected_device = resolve_working_video_device(active_video_device)
-                        if detected_device != active_video_device:
-                            print(f'switching video device from {active_video_device} to {detected_device}')
-                            active_video_device = detected_device
-                    elif should_probe and active_video_device is None:
-                        time.sleep(0.1)
-                        continue
-
-                    if active_video_device is None:
-                        if now_monotonic >= next_video_probe_at:
-                            print('no working camera detected; delaying h264 start until a device is available', file=sys.stderr)
-                            next_video_probe_at = now_monotonic + VIDEO_REPROBE_DELAY_SECONDS
-                        time.sleep(0.1)
-                        continue
-
-                    active_input = h264_input_formats[h264_input_index]
-                    active_encoder = h264_encoders[h264_encoder_index]
-                    h264_process = start_h264_ffmpeg(active_input, active_encoder, active_video_device)
-                    h264_started_at = time.monotonic()
-                    h264_last_chunk_at = None
-                except Exception as exc:
-                    if strict_hardware_only:
-                        print(f'h264 pipeline start failed in strict mode; retrying: {exc}', file=sys.stderr)
-                        time.sleep(0.5)
-                        continue
-                    print(f'h264 pipeline start failed; staying on hardware path: {exc}', file=sys.stderr)
-                    continue
-
-            if h264_process.poll() is not None:
-                h264_failures += 1
-                exit_code = h264_process.returncode
-                stderr_output = ''
-                try:
-                    if h264_process.stderr is not None:
-                        stderr_output = h264_process.stderr.read().decode('utf-8', errors='ignore').strip()
-                except Exception:
-                    stderr_output = ''
-
-                if stderr_output:
-                    print(f'h264 encoder exited; stderr: {stderr_output}', file=sys.stderr)
-                else:
-                    print('h264 encoder exited; restarting', file=sys.stderr)
-
-                camera_error_kind = classify_camera_error(stderr_output)
-                if VIDEO_DEVICE_AUTO_RECOVER and camera_error_kind in {'busy', 'missing'}:
-                    if camera_error_kind == 'busy':
-                        print(
-                            f'camera /dev/video{active_video_device} busy; forcing reprobe after backoff',
-                            file=sys.stderr,
-                        )
-                    previous_device = active_video_device
-                    active_video_device = resolve_working_video_device(preferred_video_device)
-                    if active_video_device != previous_device:
-                        print(
-                            f'camera node changed; switching video device from {previous_device} to {active_video_device}',
-                            file=sys.stderr,
-                        )
-                    if active_video_device is None:
-                        print('no working camera detected after encoder failure; waiting before retry', file=sys.stderr)
-                    next_video_probe_at = time.monotonic() + VIDEO_REPROBE_DELAY_SECONDS
-
-                h264_process = None
-                h264_started_at = None
-                h264_last_chunk_at = None
-                if h264_upload_buffer:
-                    h264_upload_buffer.clear()
-                if h264_input_formats:
-                    h264_input_index = (h264_input_index + 1) % len(h264_input_formats)
-                    print(
-                        f'rotating h264 input format to {h264_input_formats[h264_input_index]}',
-                        file=sys.stderr,
-                    )
-                if h264_encoders:
-                    h264_encoder_index = (h264_encoder_index + 1) % len(h264_encoders)
-                    print(
-                        f'rotating h264 encoder to {h264_encoders[h264_encoder_index]}',
-                        file=sys.stderr,
-                    )
-                if exit_code == -11:
-                    if strict_hardware_only:
-                        print('h264 encoder crashed with segmentation fault; strict mode keeps hardware-only retries', file=sys.stderr)
-                    else:
-                        print('h264 encoder crashed with segmentation fault; staying on hardware path', file=sys.stderr)
-                elif h264_failures >= 5:
-                    if strict_hardware_only:
-                        print('h264 encoder repeatedly failed; strict mode keeps hardware-only retries', file=sys.stderr)
-                    else:
-                        print('h264 encoder repeatedly failed; staying on hardware path', file=sys.stderr)
-                time.sleep(0.2)
-                continue
-
-            ready, _, _ = select.select([h264_process.stdout], [], [], 0.5)
-            if not ready:
-                now_monotonic = time.monotonic()
-                if h264_started_at is not None and h264_last_chunk_at is None and (now_monotonic - h264_started_at) >= H264_STARTUP_TIMEOUT_SECONDS:
-                    print(
-                        f'h264 pipeline produced no output for {H264_STARTUP_TIMEOUT_SECONDS:.1f}s; restarting encoder',
-                        file=sys.stderr,
-                    )
-                    stop_h264_process(h264_process, 'startup-timeout')
-                    h264_process = None
-                    h264_started_at = None
-                    h264_last_chunk_at = None
-                    continue
-
-                if h264_last_chunk_at is not None and (now_monotonic - h264_last_chunk_at) >= H264_STALL_TIMEOUT_SECONDS:
-                    print(
-                        f'h264 pipeline stalled for {H264_STALL_TIMEOUT_SECONDS:.1f}s; restarting encoder',
-                        file=sys.stderr,
-                    )
-                    stop_h264_process(h264_process, 'stall-timeout')
-                    h264_process = None
-                    h264_started_at = None
-                    h264_last_chunk_at = None
-                    continue
-
-                if h264_upload_buffer and (time.monotonic() - h264_last_upload) >= h264_max_delay:
-                    flush_started = time.monotonic()
-                    flush_size = len(h264_upload_buffer)
-                    enqueue_h264_payload(h264_upload_queue, bytes(h264_upload_buffer))
-                    h264_upload_buffer.clear()
-                    h264_last_upload = time.monotonic()
-                    if STREAM_PROFILE:
-                        profile_post_elapsed += time.monotonic() - flush_started
-                        profile_upload_bytes += flush_size
-                        profile_event_count += 1
-                        log_profile_event(
-                            path='h264_hw',
-                            message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
-                        )
-                    if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
-                        profile_total_elapsed = time.monotonic() - profile_window_started
-                        log_profile_summary(
-                            path='h264_hw',
-                            event_count=profile_event_count,
-                            total_elapsed=profile_total_elapsed,
-                            read_elapsed=profile_read_elapsed,
-                            post_elapsed=profile_post_elapsed,
-                            upload_bytes=profile_upload_bytes,
-                        )
-                        profile_event_count = 0
-                        profile_window_started = time.monotonic()
-                        profile_read_elapsed = 0.0
-                        profile_post_elapsed = 0.0
-                        profile_upload_bytes = 0
-                continue
-
-            read_started = time.monotonic()
-            chunk = h264_process.stdout.read(max(1024, H264_CHUNK_BYTES))
-            profile_read_elapsed += time.monotonic() - read_started
-            if not chunk:
-                time.sleep(0.05)
-                continue
-
-            h264_last_chunk_at = time.monotonic()
-
-            h264_upload_buffer.extend(chunk)
-            should_flush = (
-                len(h264_upload_buffer) >= h264_batch_bytes
-                or (
-                    len(h264_upload_buffer) >= h264_min_flush_bytes
-                    and (time.monotonic() - h264_last_upload) >= h264_max_delay
-                )
-            )
-
-            if not should_flush:
-                continue
-
-            post_started = time.monotonic()
-            flush_size = len(h264_upload_buffer)
-            enqueue_h264_payload(h264_upload_queue, bytes(h264_upload_buffer))
-            h264_upload_buffer.clear()
-            h264_last_upload = time.monotonic()
-            if STREAM_PROFILE:
-                profile_post_elapsed += time.monotonic() - post_started
-                profile_upload_bytes += flush_size
-                profile_event_count += 1
-                log_profile_event(
-                    path='h264_hw',
-                    message=f'flush bytes={flush_size} queued={profile_upload_bytes} events={profile_event_count}',
-                )
-            if STREAM_PROFILE and (profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0):
-                profile_total_elapsed = time.monotonic() - profile_window_started
-                log_profile_summary(
-                    path='h264_hw',
-                    event_count=profile_event_count,
-                    total_elapsed=profile_total_elapsed,
-                    read_elapsed=profile_read_elapsed,
-                    post_elapsed=profile_post_elapsed,
-                    upload_bytes=profile_upload_bytes,
-                )
-                profile_event_count = 0
-                profile_window_started = time.monotonic()
-                profile_read_elapsed = 0.0
-                profile_post_elapsed = 0.0
-                profile_upload_bytes = 0
-            continue
-
-        if cap is None:
-            if auto_video_select or VIDEO_DEVICE_AUTO_RECOVER:
-                detected_device = resolve_working_video_device(active_video_device)
-                if detected_device != active_video_device:
-                    print(f'switching video device from {active_video_device} to {detected_device}')
-                    active_video_device = detected_device
+        if stream_enabled and publish_url:
+            now = time.monotonic()
+            should_probe = active_video_device is None or auto_video_select or VIDEO_DEVICE_AUTO_RECOVER
+            if should_probe and now >= next_probe_at:
+                detected = resolve_working_video_device(active_video_device)
+                if detected != active_video_device:
+                    print(f'switching video device from {active_video_device} to {detected}')
+                    active_video_device = detected
+                next_probe_at = now + VIDEO_REPROBE_DELAY_SECONDS
 
             if active_video_device is None:
-                time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
+                print('no working camera detected for MediaMTX publish; retrying', file=sys.stderr)
+                time.sleep(STREAM_STATUS_POLL_SECONDS)
                 continue
 
-            cap = open_capture(active_video_device)
-            if not cap.isOpened():
-                print(f'Unable to open camera device /dev/video{active_video_device}', file=sys.stderr)
-                cap = None
-                time.sleep(max(STREAM_IDLE_POLL_SECONDS, 0.2))
-                continue
+            if publisher_process is None or active_publish_url != publish_url:
+                stop_publisher(publisher_process, 'reconfigure')
+                publisher_process = start_publisher(active_video_device, publish_url)
+                active_publish_url = publish_url
 
-        frame_started = time.monotonic()
-        ok, frame = cap.read()
-        if not ok:
-            time.sleep(0.01)
-            continue
-
-        encode_started = time.monotonic()
-        _, encoded = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), QUALITY])
-        encode_elapsed = time.monotonic() - encode_started
-        payload = encoded.tobytes()
-        post_started = time.monotonic()
-        try:
-            post_bytes(STREAM_ENDPOINT, payload, 'image/jpeg')
-        except Exception as exc:
-            print(f'Upload failed: {exc}', file=sys.stderr)
-
-        if STREAM_PROFILE:
-            profile_event_count += 1
-            profile_read_elapsed += encode_started - frame_started
-            profile_encode_elapsed += encode_elapsed
-            profile_post_elapsed += time.monotonic() - post_started
-            profile_upload_bytes += len(payload)
-            log_profile_event(
-                path='mjpg',
-                message=f'frame bytes={len(payload)} events={profile_event_count} encode_ms={encode_elapsed * 1000:.1f}',
-            )
-            if profile_event_count <= 3 or profile_event_count % STREAM_PROFILE_EVERY == 0:
-                profile_total_elapsed = time.monotonic() - profile_window_started
-                log_profile_summary(
-                    path='mjpg',
-                    event_count=profile_event_count,
-                    total_elapsed=profile_total_elapsed,
-                    read_elapsed=profile_read_elapsed,
-                    post_elapsed=profile_post_elapsed,
-                    encode_elapsed=profile_encode_elapsed,
-                    upload_bytes=profile_upload_bytes,
+            if publisher_process.poll() is not None:
+                stderr_tail = ''
+                if publisher_process.stderr is not None:
+                    try:
+                        stderr_tail = (publisher_process.stderr.read() or '').strip()
+                    except Exception:
+                        stderr_tail = ''
+                print(
+                    f'MediaMTX publisher exited code={publisher_process.returncode} '
+                    f'stderr={stderr_tail or "n/a"}',
+                    file=sys.stderr,
                 )
-                profile_event_count = 0
-                profile_window_started = time.monotonic()
-                profile_read_elapsed = 0.0
-                profile_post_elapsed = 0.0
-                profile_encode_elapsed = 0.0
-                profile_upload_bytes = 0
+                stop_publisher(publisher_process, 'unexpected-exit')
+                publisher_process = None
+                time.sleep(0.5)
 
-        elapsed = time.monotonic() - frame_started
-        remaining = frame_period - elapsed
-        if remaining > 0:
-            time.sleep(remaining)
+        else:
+            if publisher_process is not None and stream_disabled_since is not None:
+                disabled_for = time.monotonic() - stream_disabled_since
+                if disabled_for >= STREAM_DISABLE_GRACE_SECONDS:
+                    stop_publisher(publisher_process, 'disabled')
+                    publisher_process = None
+                    active_publish_url = None
+                    print('MediaMTX publisher stopped while stream disabled')
 
-    h264_upload_stop.set()
-    h264_upload_thread.join(timeout=1.0)
+        time.sleep(STREAM_STATUS_POLL_SECONDS)
 
 
 if __name__ == '__main__':
