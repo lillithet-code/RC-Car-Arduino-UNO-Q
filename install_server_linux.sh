@@ -45,6 +45,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="${SOURCE_DIR:-$SCRIPT_DIR}"
 mkdir -p "$APP_DIR"
 
+if [[ -n "$PLESK_DOMAIN" ]]; then
+  if [[ -z "$MEDIAMTX_RTSP_BASE" ]]; then
+    MEDIAMTX_RTSP_BASE="rtsp://$PLESK_DOMAIN:8554"
+  fi
+  if [[ -z "$MEDIAMTX_WHEP_BASE" ]]; then
+    MEDIAMTX_WHEP_BASE="https://$PLESK_DOMAIN"
+  fi
+fi
+
 if [[ "$SOURCE_DIR" != "$APP_DIR" ]]; then
   echo "Syncing source files from $SOURCE_DIR to $APP_DIR"
   if command -v rsync >/dev/null 2>&1; then
@@ -137,11 +146,37 @@ location / {
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
 }
+
+location /ws/ {
+    proxy_pass http://127.0.0.1:$PORT;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+}
+
+location /cars/ {
+    proxy_pass http://127.0.0.1:8889/cars/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+}
 EOF_PLESK
     echo "Created Plesk reverse-proxy config at $PLESK_VHOST_DIR/vhost_nginx.conf"
 
     if command -v plesk >/dev/null 2>&1; then
       sudo plesk sbin httpdmng --reconfigure-domain "$PLESK_DOMAIN" || true
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+      if systemctl is-active --quiet nginx; then
+        sudo systemctl reload nginx || true
+      elif systemctl list-unit-files | grep -q '^sw-nginx\\.service'; then
+        sudo systemctl reload sw-nginx || sudo service sw-nginx reload || true
+      fi
     fi
   else
     echo "Plesk domain config directory not found; please add a reverse proxy manually for $PLESK_DOMAIN"
