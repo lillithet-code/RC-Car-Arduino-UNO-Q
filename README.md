@@ -78,6 +78,15 @@ Per-car path format:
 
 ## Install scripts
 
+Unified installer (runs git pull + install):
+```bash
+# server
+MODE=server ./install_unified.sh
+
+# board
+MODE=board ./install_unified.sh
+```
+
 Server app install:
 ```bash
 ./install_server_linux.sh
