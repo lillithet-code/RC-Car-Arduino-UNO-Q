@@ -1265,7 +1265,6 @@ def create_app(test_config=None):
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
         board_name = normalize_board_name(resolve_board_name())
-        mark_board_activity_for_device('stream_status_poll', board_name)
 
         db = get_db()
         sync_device_statuses(db)
@@ -1281,13 +1280,19 @@ def create_app(test_config=None):
                 """,
                 (board_name,),
             ).fetchone()
+            device_row = db.execute('SELECT id, status, last_seen_at FROM devices WHERE name = ?', (board_name,)).fetchone()
+            device_online = bool(device_row and is_device_online(dict(device_row), datetime.now(timezone.utc)))
+            enabled = bool(active_row is not None or (device_row is not None and device_online))
             stream_urls = build_stream_urls(board_name)
         else:
             active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
             stream_urls = {'path': None, 'whep_url': None, 'rtsp_url': None}
+            enabled = bool(active_row is not None)
+
+        mark_board_activity_for_device('stream_status_poll', board_name)
         return jsonify({
             'status': 'ok',
-            'enabled': active_row is not None,
+            'enabled': enabled,
             'board_active': is_board_active(),
             'board_name': board_name,
             'stream_path': stream_urls['path'],
@@ -1304,8 +1309,6 @@ def create_app(test_config=None):
         if not board_name:
             return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
 
-        mark_board_activity_for_device('stream_config_poll', board_name)
-
         db = get_db()
         active_row = db.execute(
             """
@@ -1318,10 +1321,15 @@ def create_app(test_config=None):
             """,
             (board_name,),
         ).fetchone()
+        device_row = db.execute('SELECT id, status, last_seen_at FROM devices WHERE name = ?', (board_name,)).fetchone()
+        device_online = bool(device_row and is_device_online(dict(device_row), datetime.now(timezone.utc)))
+        enabled = bool(active_row is not None or (device_row is not None and device_online))
         stream_urls = build_stream_urls(board_name)
+
+        mark_board_activity_for_device('stream_config_poll', board_name)
         return jsonify({
             'status': 'ok',
-            'enabled': active_row is not None,
+            'enabled': enabled,
             'board_name': board_name,
             'stream_path': stream_urls['path'],
             'whep_url': stream_urls['whep_url'],

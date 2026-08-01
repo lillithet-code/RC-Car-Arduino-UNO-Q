@@ -761,6 +761,31 @@ def test_board_commands_are_exposed_for_the_board_client(client):
     assert payload['action'] == 'forward'
 
 
+def test_board_stream_status_enables_registered_online_boards(client):
+    client.post('/register', data={
+        'username': 'ivy',
+        'password': 'secret123',
+        'email': 'ivy@example.com'
+    })
+    client.post('/login', data={
+        'username': 'ivy',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-ivy',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-ivy')
+
+    response = client.get('/api/board/stream/status?board_name=rc-car-ivy')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['status'] == 'ok'
+    assert payload['enabled'] is True
+    assert 'board_active' in payload
+
+
 def test_board_stream_status_reflects_active_sessions(client):
     inactive_response = client.get('/api/board/stream/status?board_name=rc-car-ivy')
     assert inactive_response.status_code == 200
