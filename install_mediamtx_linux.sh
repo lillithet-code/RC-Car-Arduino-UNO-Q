@@ -5,8 +5,12 @@ MEDIAMTX_VERSION="${MEDIAMTX_VERSION:-1.15.2}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/mediamtx}"
 MEDIAMTX_USER="${MEDIAMTX_USER:-mediamtx}"
 MEDIAMTX_GROUP="${MEDIAMTX_GROUP:-mediamtx}"
-HTTP_LISTEN="${MEDIAMTX_HTTP_LISTEN:-:8889}"
+HTTP_LISTEN="${MEDIAMTX_HTTP_LISTEN:-127.0.0.1:8889}"
 RTSP_LISTEN="${MEDIAMTX_RTSP_LISTEN:-:8554}"
+WEBRTC_ALLOW_ORIGIN="${MEDIAMTX_WEBRTC_ALLOW_ORIGIN:-*}"
+WEBRTC_UDP_LISTEN="${MEDIAMTX_WEBRTC_UDP_LISTEN:-:8189}"
+WEBRTC_TCP_LISTEN="${MEDIAMTX_WEBRTC_TCP_LISTEN:-:8189}"
+WEBRTC_ADDITIONAL_HOST="${MEDIAMTX_WEBRTC_ADDITIONAL_HOST:-drive.kbob.org}"
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -38,7 +42,14 @@ sudo install -m 0755 "$TMP_DIR/mediamtx" "$INSTALL_DIR/mediamtx"
 sudo tee "$INSTALL_DIR/mediamtx.yml" >/dev/null <<EOF
 logLevel: info
 rtspAddress: ${RTSP_LISTEN}
+webrtc: yes
 webrtcAddress: ${HTTP_LISTEN}
+webrtcAllowOrigin: '${WEBRTC_ALLOW_ORIGIN}'
+webrtcLocalUDPAddress: ${WEBRTC_UDP_LISTEN}
+webrtcLocalTCPAddress: ${WEBRTC_TCP_LISTEN}
+webrtcIPsFromInterfaces: yes
+webrtcAdditionalHosts:
+  - ${WEBRTC_ADDITIONAL_HOST}
 api: yes
 apiAddress: 127.0.0.1:9997
 EOF

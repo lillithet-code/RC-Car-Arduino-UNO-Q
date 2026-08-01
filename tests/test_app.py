@@ -20,6 +20,7 @@ def client():
     app = create_app({
         'STREAM_READY_MIN_FRAMES': 1,
         'STREAM_READY_WINDOW_SECONDS': 2.0,
+        'MEDIAMTX_TEST_PATH_STATES': {},
     })
     app.config['TESTING'] = True
     with app.test_client() as client:
@@ -31,6 +32,33 @@ def client():
 def mark_board_online(client, board_name):
     response = client.get(f'/api/board/stream/status?token=dev-board-token&board_name={board_name}')
     assert response.status_code == 200
+
+
+def set_mediamtx_state(
+    client,
+    board_name,
+    *,
+    reachable=True,
+    exists=True,
+    ready=True,
+    has_h264=True,
+    bytes_received=4096,
+    stream_live=True,
+):
+    states = client.application.config['MEDIAMTX_TEST_PATH_STATES']
+    stream_ready = bool(reachable and exists and ready and has_h264 and int(bytes_received or 0) > 0)
+    states[board_name] = {
+        'reachable': reachable,
+        'exists': exists,
+        'ready': ready,
+        'has_h264': has_h264,
+        'bytes_received': bytes_received,
+        'bytes_received_ok': int(bytes_received or 0) > 0,
+        'stream_ready': stream_ready,
+        'stream_live': bool(stream_live and stream_ready),
+        'tracks': [{'codec': 'H264'}] if has_h264 else [{'codec': 'VP8'}],
+        'error': None if reachable else 'override unreachable',
+    }
 
 
 def test_register_and_login(client):
@@ -184,8 +212,7 @@ def test_session_countdown_starts_after_stream_appears(client):
     start_before_stream = client.post('/api/session/start')
     assert start_before_stream.status_code == 409
 
-    frame_response = client.post('/api/video/pipeline/frame', data=b'frame-start', content_type='image/jpeg')
-    assert frame_response.status_code == 200
+    set_mediamtx_state(client, 'rc-car-frank', ready=True, has_h264=True, bytes_received=1000, stream_live=True)
 
     start_after_stream = client.post('/api/session/start')
     assert start_after_stream.status_code == 200
@@ -223,14 +250,13 @@ def test_stream_loss_refunds_and_allows_new_request(client):
     assert first_request.status_code == 200
     assert b'Control session started' in first_request.data
 
-    frame_response = client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
-    assert frame_response.status_code == 200
+    set_mediamtx_state(client, 'rc-car-gary', ready=True, has_h264=True, bytes_received=1000, stream_live=True)
 
     start_response = client.post('/api/session/start')
     assert start_response.status_code == 200
 
-    # Force stream staleness quickly and trigger refresh via a page request.
-    client.application.config['STREAM_STALE_SECONDS'] = 0.0
+    # Force stream-loss quickly and trigger refresh via a page request.
+    set_mediamtx_state(client, 'rc-car-gary', exists=False, ready=False, has_h264=False, bytes_received=0, stream_live=False)
     client.application.config['STREAM_LOSS_GRACE_SECONDS'] = 0.0
     dashboard_response = client.get('/')
     assert dashboard_response.status_code == 200
@@ -271,12 +297,7 @@ def test_session_start_requires_stream_ready(client):
     request_response = client.post('/request_car')
     assert request_response.status_code == 200
 
-    # Make readiness stricter than liveness for this test.
-    client.application.config['STREAM_READY_MIN_FRAMES'] = 5
-    client.application.config['STREAM_READY_WINDOW_SECONDS'] = 2.0
-
-    frame_response = client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
-    assert frame_response.status_code == 200
+    set_mediamtx_state(client, 'rc-car-ruth', ready=False, has_h264=False, bytes_received=0, stream_live=False)
 
     start_response = client.post('/api/session/start')
     assert start_response.status_code == 409
@@ -307,16 +328,15 @@ def test_billing_pauses_when_stream_not_ready(client):
     request_response = client.post('/request_car')
     assert request_response.status_code == 200
 
-    client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
+    set_mediamtx_state(client, 'rc-car-sara', ready=True, has_h264=True, bytes_received=900, stream_live=True)
     start_response = client.post('/api/session/start')
     assert start_response.status_code == 200
 
     first_status = client.get('/api/session/status').get_json()
     remaining_before = first_status['remaining_seconds']
 
-    # Force stream to become not-ready quickly and trigger session refresh.
-    client.application.config['STREAM_STALE_SECONDS'] = 0.0
-    client.application.config['STREAM_READY_WINDOW_SECONDS'] = 1.0
+    # Force stream to become not-ready and trigger session refresh.
+    set_mediamtx_state(client, 'rc-car-sara', ready=False, has_h264=False, bytes_received=0, stream_live=False)
     client.get('/')
 
     second_status = client.get('/api/session/status').get_json()
@@ -348,7 +368,7 @@ def test_billing_requires_client_visibility_heartbeat(client):
     request_response = client.post('/request_car')
     assert request_response.status_code == 200
 
-    client.post('/api/video/pipeline/frame', data=b'frame-1', content_type='image/jpeg')
+    set_mediamtx_state(client, 'rc-car-tina', ready=True, has_h264=True, bytes_received=1200, stream_live=True)
     start_response = client.post('/api/session/start')
     assert start_response.status_code == 200
 
@@ -362,7 +382,7 @@ def test_billing_requires_client_visibility_heartbeat(client):
         conn.close()
 
     # Keep stream ready but do not send visibility heartbeat.
-    client.post('/api/video/pipeline/frame', data=b'frame-2', content_type='image/jpeg')
+    set_mediamtx_state(client, 'rc-car-tina', ready=True, has_h264=True, bytes_received=1400, stream_live=True)
     before_status = client.get('/api/session/status').get_json()
     before_remaining = before_status['remaining_seconds']
 
@@ -373,7 +393,7 @@ def test_billing_requires_client_visibility_heartbeat(client):
     # Send visibility heartbeat and verify billing resumes.
     visibility_response = client.post('/api/session/visibility', json={'visible': True})
     assert visibility_response.status_code == 200
-    client.post('/api/video/pipeline/frame', data=b'frame-3', content_type='image/jpeg')
+    set_mediamtx_state(client, 'rc-car-tina', ready=True, has_h264=True, bytes_received=1800, stream_live=True)
     with client.application.app_context():
         database_url = client.application.config['DATABASE_URL']
         path = database_url.replace('sqlite:///', '', 1)
@@ -420,6 +440,139 @@ def test_release_still_works_when_stream_never_started(client):
     release_response = client.post('/release_car', follow_redirects=True)
     assert release_response.status_code == 200
     assert b'Request RC Car' in release_response.data
+
+
+def test_stream_urls_build_expected_whep_and_rtsp(client):
+    client.post('/register', data={
+        'username': 'uma',
+        'password': 'secret123',
+        'email': 'uma@example.com'
+    })
+    client.post('/login', data={
+        'username': 'uma',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-uma',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-uma')
+    client.post('/request_car')
+
+    response = client.get('/api/session/stream')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['status'] == 'ok'
+    assert payload['stream_path'] == 'cars/rc-car-uma'
+    assert payload['rtsp_url'].endswith('/cars/rc-car-uma')
+    assert payload['whep_url'].endswith('/cars/rc-car-uma/whep')
+
+
+def test_mediamtx_ready_offline_unreachable_statuses(client):
+    client.post('/register', data={
+        'username': 'vera',
+        'password': 'secret123',
+        'email': 'vera@example.com'
+    })
+    client.post('/login', data={
+        'username': 'vera',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-vera',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-vera')
+    client.post('/request_car')
+
+    set_mediamtx_state(client, 'rc-car-vera', ready=True, has_h264=True, bytes_received=3000, stream_live=True)
+    ready_payload = client.get('/api/session/status').get_json()
+    assert ready_payload['stream_ready'] is True
+    assert ready_payload['stream_live'] is True
+
+    set_mediamtx_state(client, 'rc-car-vera', ready=False, has_h264=False, bytes_received=0, stream_live=False)
+    offline_payload = client.get('/api/session/status').get_json()
+    assert offline_payload['stream_ready'] is False
+
+    set_mediamtx_state(client, 'rc-car-vera', reachable=False, exists=False, ready=False, has_h264=False, bytes_received=0, stream_live=False)
+    unreachable_payload = client.get('/api/session/status').get_json()
+    assert unreachable_payload['stream_ready'] is False
+    assert unreachable_payload['mediamtx_reachable'] is False
+
+
+def test_board_name_path_isolation(client):
+    client.post('/register', data={
+        'username': 'walt',
+        'password': 'secret123',
+        'email': 'walt@example.com'
+    })
+    client.post('/login', data={
+        'username': 'walt',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'car-alpha',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'car-beta',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'car-alpha')
+    mark_board_online(client, 'car-beta')
+    client.post('/request_car')
+
+    set_mediamtx_state(client, 'car-alpha', ready=True, has_h264=True, bytes_received=4000, stream_live=True)
+    set_mediamtx_state(client, 'car-beta', ready=False, has_h264=False, bytes_received=0, stream_live=False)
+    stream_payload = client.get('/api/session/stream').get_json()
+    assert stream_payload['stream_path'] == 'cars/car-alpha'
+    assert stream_payload['ready'] is True
+    assert stream_payload['rtsp_url'].endswith('/cars/car-alpha')
+
+
+def test_legacy_jpeg_heartbeat_does_not_make_rtsp_ready(client):
+    client.post('/register', data={
+        'username': 'xena',
+        'password': 'secret123',
+        'email': 'xena@example.com'
+    })
+    client.post('/login', data={
+        'username': 'xena',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-xena',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-xena')
+    client.post('/request_car')
+
+    set_mediamtx_state(client, 'rc-car-xena', ready=False, has_h264=False, bytes_received=0, stream_live=False)
+    frame_response = client.post('/api/video/pipeline/frame', data=b'legacy-frame', content_type='image/jpeg')
+    assert frame_response.status_code == 200
+
+    start_response = client.post('/api/session/start')
+    assert start_response.status_code == 409
+    payload = client.get('/api/session/status').get_json()
+    assert payload['stream_ready'] is False
+
+
+def test_dashboard_has_webrtc_setup_inflight_guard(client):
+    client.post('/register', data={
+        'username': 'yuri',
+        'password': 'secret123',
+        'email': 'yuri@example.com'
+    })
+    response = client.get('/')
+    assert response.status_code == 200
+    html = response.data.decode('utf-8')
+    assert 'let webRtcSetupInFlight = false;' in html
+    assert 'if (webRtcSetupInFlight) {' in html
 
 
 def test_request_car_allows_partial_session_when_balance_under_default(client):

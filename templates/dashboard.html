@@ -87,6 +87,9 @@
     const remainingTime = document.getElementById('remaining-time');
     const streamRefreshIntervalMs = 500;
     const commandHeartbeatIntervalMs = 120;
+    const webRtcRetryBaseMs = 1000;
+    const webRtcRetryMaxMs = 10000;
+    const iceGatheringTimeoutMs = 4000;
     let dragging = false;
     let streamLive = false;
     let streamReady = false;
@@ -100,6 +103,17 @@
     let currentDriveAction = 'stop';
     let streamConnectionError = null;
     let streamWhepUrl = null;
+    let currentWhepSessionUrl = null;
+    let webRtcSetupInFlight = false;
+    let webRtcRetryAttempt = 0;
+    let webRtcRetryTimer = null;
+    let webRtcAttemptNonce = 0;
+    let videoTrackReceived = false;
+    let lastWhepHttpStatus = null;
+    let lastPeerConnectionState = 'new';
+    let lastIceConnectionState = 'new';
+    let lastIceGatheringState = 'new';
+    let localIceUfrag = '';
 
     function escapeHtml(value) {
       return String(value || '')
@@ -133,9 +147,13 @@
         return;
       }
 
-      const statusText = streamReady ? 'ready' : (streamLive ? 'live, waiting for ready threshold' : 'offline');
+      const statusText = streamReady ? 'ready' : (streamLive ? 'live, waiting for readiness' : 'offline');
       const transportText = usingWebRTC ? 'WebRTC active' : 'WebRTC not connected';
       const whepText = streamWhepUrl || 'not available';
+      const whepStatusText = lastWhepHttpStatus == null ? 'n/a' : String(lastWhepHttpStatus);
+      const videoStateText = streamVideo
+        ? `${streamVideo.videoWidth}x${streamVideo.videoHeight} readyState=${streamVideo.readyState}`
+        : 'n/a';
       let message = 'Waiting for stream initialization.';
       let level = 'warning';
 
@@ -146,7 +164,7 @@
         message = streamConnectionError;
         level = 'error';
       } else if (!streamReady) {
-        message = 'No recent frame heartbeat from app ingest path; attempting direct WebRTC playback via MediaMTX.';
+        message = 'MediaMTX path is not ready yet; waiting for RTSP publish and WHEP negotiation.';
       }
 
       setStreamDiagnosticsLevel(level);
@@ -155,6 +173,12 @@
         `<p><span class="label">Session stream status:</span>${escapeHtml(statusText)}</p>`,
         `<p><span class="label">Playback transport:</span>${escapeHtml(transportText)}</p>`,
         `<p><span class="label">WHEP endpoint:</span><code>${escapeHtml(whepText)}</code></p>`,
+        `<p><span class="label">WHEP HTTP status:</span>${escapeHtml(whepStatusText)}</p>`,
+        `<p><span class="label">ICE gathering:</span>${escapeHtml(lastIceGatheringState)}</p>`,
+        `<p><span class="label">ICE connection:</span>${escapeHtml(lastIceConnectionState)}</p>`,
+        `<p><span class="label">Peer connection:</span>${escapeHtml(lastPeerConnectionState)}</p>`,
+        `<p><span class="label">Video track received:</span>${escapeHtml(videoTrackReceived ? 'yes' : 'no')}</p>`,
+        `<p><span class="label">Video element:</span>${escapeHtml(videoStateText)}</p>`,
       ].join('');
       streamDiagnostics.style.display = 'block';
     }
@@ -167,10 +191,78 @@
       renderStreamDiagnostics();
     }
 
-    async function closePeerConnection() {
+    function clearWebRtcRetry() {
+      if (webRtcRetryTimer) {
+        clearTimeout(webRtcRetryTimer);
+        webRtcRetryTimer = null;
+      }
+    }
+
+    function absoluteUrlFromLocation(baseUrl, locationHeader) {
+      if (!locationHeader) {
+        return null;
+      }
+      try {
+        return new URL(locationHeader, baseUrl).toString();
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function parseIceServersFromLinkHeader(linkHeader) {
+      if (!linkHeader) {
+        return [];
+      }
+
+      const entries = [];
+      const parts = linkHeader.split(',');
+      for (const part of parts) {
+        const urlMatch = part.match(/<([^>]+)>/);
+        if (!urlMatch) {
+          continue;
+        }
+        const relMatch = part.match(/rel\s*=\s*"?ice-server"?/i);
+        if (!relMatch) {
+          continue;
+        }
+
+        const urls = urlMatch[1];
+        const usernameMatch = part.match(/username\s*=\s*"([^"]*)"/i);
+        const credentialMatch = part.match(/credential\s*=\s*"([^"]*)"/i);
+        const credentialTypeMatch = part.match(/credential-type\s*=\s*"([^"]*)"/i);
+        const server = { urls };
+        if (usernameMatch) {
+          server.username = usernameMatch[1];
+        }
+        if (credentialMatch) {
+          server.credential = credentialMatch[1];
+        }
+        if (credentialTypeMatch) {
+          server.credentialType = credentialTypeMatch[1];
+        }
+        entries.push(server);
+      }
+
+      return entries;
+    }
+
+    async function closePeerConnection(options = {}) {
+      const { deleteWhepSession = true } = options;
+
+      const sessionToDelete = currentWhepSessionUrl;
+      currentWhepSessionUrl = null;
+
       if (!peerConnection) {
+        if (deleteWhepSession && sessionToDelete) {
+          try {
+            await fetch(sessionToDelete, { method: 'DELETE' });
+          } catch (error) {
+            // Ignore cleanup failure.
+          }
+        }
         return;
       }
+
       try {
         peerConnection.getSenders().forEach((sender) => {
           if (sender.track) {
@@ -189,6 +281,19 @@
       peerConnection = null;
       usingWebRTC = false;
       activeStreamId = null;
+      videoTrackReceived = false;
+      lastPeerConnectionState = 'closed';
+      lastIceConnectionState = 'closed';
+      lastIceGatheringState = 'complete';
+
+      if (deleteWhepSession && sessionToDelete) {
+        try {
+          await fetch(sessionToDelete, { method: 'DELETE' });
+        } catch (error) {
+          // Ignore cleanup failure.
+        }
+      }
+
       renderStreamDiagnostics();
     }
 
@@ -306,6 +411,7 @@
 
     async function fetchSessionStreamConfig() {
       const response = await fetch('/api/session/stream', { cache: 'no-store' });
+      lastWhepHttpStatus = response.status;
       if (!response.ok) {
         throw new Error(`stream config failed (${response.status})`);
       }
@@ -317,13 +423,28 @@
       return payload;
     }
 
-    function waitForIceGatheringComplete(pc) {
+    function waitForIceGatheringComplete(pc, timeoutMs) {
       if (pc.iceGatheringState === 'complete') {
         return Promise.resolve();
       }
       return new Promise((resolve) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          pc.removeEventListener('icegatheringstatechange', checkState);
+          resolve();
+        }, timeoutMs);
+
         const checkState = () => {
           if (pc.iceGatheringState === 'complete') {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            clearTimeout(timeout);
             pc.removeEventListener('icegatheringstatechange', checkState);
             resolve();
           }
@@ -332,28 +453,105 @@
       });
     }
 
+    function extractIceUfrag(sdp) {
+      const match = String(sdp || '').match(/^a=ice-ufrag:(.+)$/m);
+      return match ? match[1].trim() : '';
+    }
+
+    async function sendWhepPatchCandidate(whepSessionUrl, candidate) {
+      if (!whepSessionUrl || !candidate || !candidate.candidate) {
+        return;
+      }
+
+      const mid = candidate.sdpMid || '0';
+      const fragment = [
+        `a=ice-ufrag:${localIceUfrag}`,
+        'm=video 9 UDP/TLS/RTP/SAVPF 96',
+        `a=mid:${mid}`,
+        `a=${candidate.candidate}`,
+        '',
+      ].join('\r\n');
+
+      try {
+        const response = await fetch(whepSessionUrl, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/trickle-ice-sdpfrag',
+            'If-Match': '*',
+          },
+          body: fragment,
+        });
+        lastWhepHttpStatus = response.status;
+      } catch (error) {
+        // Ignore transient trickle transport failures.
+      }
+    }
+
+    function scheduleWebRtcRetry() {
+      if (!hasActiveSession) {
+        return;
+      }
+      clearWebRtcRetry();
+      const delay = Math.min(webRtcRetryMaxMs, webRtcRetryBaseMs * (2 ** webRtcRetryAttempt));
+      webRtcRetryAttempt += 1;
+      webRtcRetryTimer = setTimeout(() => {
+        webRtcRetryTimer = null;
+        setupWebRTC();
+      }, delay);
+    }
+
+    async function fetchIceServersViaOptions(whepUrl) {
+      const response = await fetch(whepUrl, { method: 'OPTIONS' });
+      lastWhepHttpStatus = response.status;
+      const linkHeader = response.headers.get('Link') || response.headers.get('link') || '';
+      const parsedIceServers = parseIceServersFromLinkHeader(linkHeader);
+      if (parsedIceServers.length > 0) {
+        return parsedIceServers;
+      }
+      return [{ urls: 'stun:stun.l.google.com:19302' }];
+    }
+
     async function setupWebRTC() {
+      if (webRtcSetupInFlight) {
+        return;
+      }
       if (!window.RTCPeerConnection || !streamVideo) {
         showWebRtcFailure('This browser does not support WebRTC playback.');
         return;
       }
+      if (!hasActiveSession) {
+        return;
+      }
+
+      webRtcSetupInFlight = true;
+      const attemptNonce = ++webRtcAttemptNonce;
 
       try {
-        await closePeerConnection();
+        clearWebRtcRetry();
+        await closePeerConnection({ deleteWhepSession: true });
         streamConnectionError = null;
+        videoTrackReceived = false;
         renderStreamDiagnostics();
 
         const streamConfig = await fetchSessionStreamConfig();
+        const iceServers = await fetchIceServersViaOptions(streamConfig.whep_url);
+        if (attemptNonce !== webRtcAttemptNonce) {
+          return;
+        }
+
         peerConnection = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+          iceServers,
         });
+        lastPeerConnectionState = peerConnection.connectionState;
+        lastIceConnectionState = peerConnection.iceConnectionState;
+        lastIceGatheringState = peerConnection.iceGatheringState;
 
         peerConnection.addTransceiver('video', { direction: 'recvonly' });
         peerConnection.ontrack = (event) => {
-          const incomingStream = event.streams[0];
-          if (!incomingStream) {
-            return;
-          }
+          const incomingStream = event.streams[0] || new MediaStream([event.track]);
+          if (!incomingStream) return;
+
+          videoTrackReceived = true;
 
           if (activeStreamId !== incomingStream.id) {
             activeStreamId = incomingStream.id;
@@ -362,6 +560,7 @@
           streamVideo.style.display = 'block';
           usingWebRTC = true;
           streamConnectionError = null;
+          webRtcRetryAttempt = 0;
           renderStreamDiagnostics();
 
           const startPlayback = async () => {
@@ -383,34 +582,80 @@
           streamVideo.onloadedmetadata = startPlayback;
         };
 
+        peerConnection.onicegatheringstatechange = () => {
+          if (!peerConnection) {
+            return;
+          }
+          lastIceGatheringState = peerConnection.iceGatheringState;
+          renderStreamDiagnostics();
+        };
+
+        peerConnection.oniceconnectionstatechange = () => {
+          if (!peerConnection) {
+            return;
+          }
+          lastIceConnectionState = peerConnection.iceConnectionState;
+          renderStreamDiagnostics();
+        };
+
+        peerConnection.onicecandidate = (event) => {
+          if (!event.candidate) {
+            return;
+          }
+          if (!currentWhepSessionUrl) {
+            return;
+          }
+          sendWhepPatchCandidate(currentWhepSessionUrl, event.candidate);
+        };
+
         peerConnection.onconnectionstatechange = () => {
+          if (!peerConnection) {
+            return;
+          }
+          lastPeerConnectionState = peerConnection.connectionState;
+          renderStreamDiagnostics();
           if (['failed', 'closed', 'disconnected'].includes(peerConnection.connectionState)) {
             const state = peerConnection.connectionState;
             showWebRtcFailure(`WebRTC connection state changed to ${state}.`);
+            scheduleWebRtcRetry();
           }
         };
 
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
-        await waitForIceGatheringComplete(peerConnection);
+        localIceUfrag = extractIceUfrag(peerConnection.localDescription ? peerConnection.localDescription.sdp : '');
+        await waitForIceGatheringComplete(peerConnection, iceGatheringTimeoutMs);
+        if (attemptNonce !== webRtcAttemptNonce) {
+          return;
+        }
 
         const response = await fetch(streamConfig.whep_url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/sdp' },
           body: peerConnection.localDescription.sdp,
         });
+        lastWhepHttpStatus = response.status;
 
-        if (!response.ok) {
+        if (response.status !== 201) {
           const detail = await response.text();
           throw new Error(`WebRTC offer failed (${response.status}) ${detail}`.trim());
         }
 
+        currentWhepSessionUrl = absoluteUrlFromLocation(streamConfig.whep_url, response.headers.get('Location') || response.headers.get('location'));
+
         const answerSdp = await response.text();
         await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+        webRtcRetryAttempt = 0;
+        renderStreamDiagnostics();
       } catch (error) {
         console.warn('WebRTC setup failed:', error);
-        await closePeerConnection();
+        await closePeerConnection({ deleteWhepSession: true });
         showWebRtcFailure(`WebRTC setup failed: ${error && error.message ? error.message : 'unknown error'}`);
+        scheduleWebRtcRetry();
+      } finally {
+        if (attemptNonce === webRtcAttemptNonce) {
+          webRtcSetupInFlight = false;
+        }
       }
     }
 
@@ -432,8 +677,10 @@
         billingStarted = Boolean(payload.billing_started);
 
         if (!hasActiveSession) {
-          await closePeerConnection();
+          clearWebRtcRetry();
+          await closePeerConnection({ deleteWhepSession: true });
           streamConnectionError = null;
+          webRtcRetryAttempt = 0;
           hideStreamSurfaces();
         } else if (usingWebRTC) {
           if (streamVideo) {
@@ -446,7 +693,7 @@
 
         renderStreamDiagnostics();
 
-        if (hasActiveSession && !usingWebRTC) {
+        if (hasActiveSession && !usingWebRTC && !webRtcSetupInFlight) {
           await setupWebRTC();
         }
 
@@ -460,7 +707,6 @@
 
     if (streamVideo || remainingTime) {
       hideStreamSurfaces();
-      setupWebRTC();
       pollSessionStatus();
       setInterval(pollSessionStatus, 1000);
       setInterval(() => {

@@ -6,6 +6,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -199,7 +200,70 @@ def build_publish_command(video_device_index, rtsp_url):
 def start_publisher(video_device_index, rtsp_url):
     command = build_publish_command(video_device_index, rtsp_url)
     print(f'starting MediaMTX publish: {" ".join(command)}')
-    return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+
+def stream_ffmpeg_stderr(process, video_device_index, rtsp_url):
+    if process is None or process.stderr is None:
+        return
+
+    def reader():
+        try:
+            for line in process.stderr:
+                text = line.strip()
+                if not text:
+                    continue
+                print(
+                    f'ffmpeg[{video_device_index} -> {rtsp_url}] {text}',
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f'ffmpeg stderr reader failed: {exc}', file=sys.stderr)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+
+
+def v4l2_mode_probe(video_device_index):
+    device = f'/dev/video{video_device_index}'
+    if not os.path.exists(device):
+        return
+
+    try:
+        result = subprocess.run(
+            ['v4l2-ctl', '-d', device, '--list-formats-ext'],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except FileNotFoundError:
+        print('v4l2-ctl not found; skipping camera capability probe', file=sys.stderr)
+        return
+    except Exception as exc:
+        print(f'camera capability probe failed: {exc}', file=sys.stderr)
+        return
+
+    if result.returncode != 0:
+        stderr_tail = (result.stderr or '').strip()
+        print(f'v4l2-ctl probe failed for {device}: {stderr_tail or "unknown error"}', file=sys.stderr)
+        return
+
+    output = result.stdout or ''
+    fmt_ok = H264_INPUT_FORMAT.lower() in output.lower()
+    size_text = f'{VIDEO_WIDTH}x{VIDEO_HEIGHT}'
+    size_ok = size_text in output
+    fps_ok = f'{int(FRAME_RATE)}.000 fps' in output or f'{FRAME_RATE:.3f} fps' in output
+
+    print(
+        f'camera capability probe device={device} format={H264_INPUT_FORMAT} supported={fmt_ok} '
+        f'resolution={size_text} supported={size_ok} fps={FRAME_RATE} supported={fps_ok}'
+    )
+    if not (fmt_ok and size_ok and fps_ok):
+        print(
+            f'configured mode may be unsupported on {device}; inspect v4l2-ctl output before changing quality',
+            file=sys.stderr,
+        )
 
 
 def main():
@@ -222,8 +286,21 @@ def main():
         config = fetch_stream_config()
         if config is not None:
             stream_enabled = bool(config.get('enabled'))
+            cfg_board_name = (config.get('board_name') or '').strip()
             configured_rtsp_url = (config.get('rtsp_url') or '').strip()
             publish_url = PUBLISH_RTSP_URL or configured_rtsp_url
+            expected_suffix = f'/cars/{urllib_parse.quote(BOARD_NAME, safe="")}'
+            if stream_enabled:
+                if cfg_board_name and cfg_board_name != BOARD_NAME:
+                    print(
+                        f'stream config board mismatch expected={BOARD_NAME} got={cfg_board_name}',
+                        file=sys.stderr,
+                    )
+                if configured_rtsp_url and not configured_rtsp_url.endswith(expected_suffix):
+                    print(
+                        f'stream config RTSP mismatch expected suffix={expected_suffix} got={configured_rtsp_url}',
+                        file=sys.stderr,
+                    )
         else:
             publish_url = active_publish_url
 
@@ -249,7 +326,9 @@ def main():
 
             if publisher_process is None or active_publish_url != publish_url:
                 stop_publisher(publisher_process, 'reconfigure')
+                v4l2_mode_probe(active_video_device)
                 publisher_process = start_publisher(active_video_device, publish_url)
+                stream_ffmpeg_stderr(publisher_process, active_video_device, publish_url)
                 active_publish_url = publish_url
 
             if publisher_process.poll() is not None:

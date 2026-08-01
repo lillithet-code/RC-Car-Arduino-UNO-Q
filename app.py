@@ -18,6 +18,75 @@ from simple_websocket import ConnectionClosed
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
+def _extract_mediamtx_tracks(payload):
+    tracks = payload.get('tracks')
+    if tracks is None and isinstance(payload.get('source'), dict):
+        tracks = payload['source'].get('tracks')
+    if tracks is None and isinstance(payload.get('stream'), dict):
+        tracks = payload['stream'].get('tracks')
+    if tracks is None:
+        return []
+    if isinstance(tracks, dict):
+        return list(tracks.values())
+    if isinstance(tracks, list):
+        return tracks
+    return [tracks]
+
+
+def _mediamtx_track_is_h264(track):
+    if isinstance(track, dict):
+        for key in ('codec', 'type', 'format', 'name', 'media'):
+            value = track.get(key)
+            if value and 'h264' in str(value).lower():
+                return True
+        return 'h264' in json.dumps(track).lower()
+    return 'h264' in str(track).lower()
+
+
+def _extract_mediamtx_bytes(payload):
+    candidates = [
+        payload.get('bytesReceived'),
+        payload.get('bytes_received'),
+        payload.get('receivedBytes'),
+    ]
+    source = payload.get('source')
+    if isinstance(source, dict):
+        candidates.extend([
+            source.get('bytesReceived'),
+            source.get('bytes_received'),
+            source.get('receivedBytes'),
+        ])
+
+    for candidate in candidates:
+        try:
+            if candidate is None:
+                continue
+            value = int(candidate)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def parse_mediamtx_path_payload(payload):
+    payload = payload or {}
+    tracks = _extract_mediamtx_tracks(payload)
+    has_h264 = any(_mediamtx_track_is_h264(track) for track in tracks)
+    bytes_received = _extract_mediamtx_bytes(payload)
+    ready = bool(payload.get('ready') or payload.get('sourceReady'))
+    bytes_received_ok = bytes_received is not None and bytes_received > 0
+    return {
+        'exists': True,
+        'ready': ready,
+        'tracks': tracks,
+        'has_h264': has_h264,
+        'bytes_received': bytes_received,
+        'bytes_received_ok': bytes_received_ok,
+        'stream_ready': bool(ready and has_h264 and bytes_received_ok),
+    }
+
+
 def create_app(test_config=None):
     app = Flask(__name__)
     sock = Sock(app)
@@ -44,6 +113,10 @@ def create_app(test_config=None):
     app.config['MEDIAMTX_RTSP_BASE'] = os.environ.get('MEDIAMTX_RTSP_BASE', '').strip().rstrip('/')
     app.config['MEDIAMTX_WHEP_BASE'] = os.environ.get('MEDIAMTX_WHEP_BASE', '').strip().rstrip('/')
     app.config['MEDIAMTX_STREAM_PREFIX'] = os.environ.get('MEDIAMTX_STREAM_PREFIX', 'cars').strip().strip('/') or 'cars'
+    app.config['MEDIAMTX_CONTROL_API'] = os.environ.get('MEDIAMTX_CONTROL_API', 'http://127.0.0.1:9997').strip().rstrip('/')
+    app.config['MEDIAMTX_CONTROL_TIMEOUT_SECONDS'] = max(0.1, float(os.environ.get('MEDIAMTX_CONTROL_TIMEOUT_SECONDS', '1.0')))
+    app.config['MEDIAMTX_STATUS_CACHE_TTL_SECONDS'] = max(0.1, float(os.environ.get('MEDIAMTX_STATUS_CACHE_TTL_SECONDS', '1.0')))
+    app.config['MEDIAMTX_BYTES_STALE_SECONDS'] = max(1.0, float(os.environ.get('MEDIAMTX_BYTES_STALE_SECONDS', '6.0')))
 
     if test_config:
         app.config.update(test_config)
@@ -244,6 +317,8 @@ def create_app(test_config=None):
         'board_last_poll_at': None,
         'board_poll_ok': None,
         'board_last_error': None,
+        'mediamtx_status_cache': {},
+        'mediamtx_bytes_state': {},
     }
 
     def normalize_board_name(raw_board_name):
@@ -359,6 +434,193 @@ def create_app(test_config=None):
             'whep_url': whep_url,
         }
 
+    def build_mediamtx_control_url(raw_board_name):
+        base = app.config.get('MEDIAMTX_CONTROL_API', '').rstrip('/')
+        if not base:
+            return None
+        encoded_path = urllib_parse.quote(build_stream_path(raw_board_name), safe='')
+        return f'{base}/v3/paths/get/{encoded_path}'
+
+    def resolve_mediamtx_override(raw_board_name):
+        overrides = app.config.get('MEDIAMTX_TEST_PATH_STATES')
+        if not isinstance(overrides, dict):
+            return None
+
+        key = board_key(raw_board_name)
+        override = overrides.get(key)
+        if override is None:
+            return None
+
+        if isinstance(override, dict) and {'reachable', 'exists'} & set(override.keys()):
+            state = {
+                'reachable': bool(override.get('reachable', True)),
+                'exists': bool(override.get('exists', False)),
+                'ready': bool(override.get('ready', False)),
+                'has_h264': bool(override.get('has_h264', False)),
+                'bytes_received': override.get('bytes_received'),
+                'bytes_received_ok': bool(override.get('bytes_received_ok', False)),
+                'stream_ready': bool(override.get('stream_ready', False)),
+                'stream_live': bool(override.get('stream_live', False)),
+                'tracks': list(override.get('tracks', [])),
+                'error': override.get('error'),
+            }
+            return state
+
+        if isinstance(override, str):
+            lowered = override.strip().lower()
+            if lowered in {'unreachable', 'error'}:
+                return {
+                    'reachable': False,
+                    'exists': False,
+                    'ready': False,
+                    'has_h264': False,
+                    'bytes_received': None,
+                    'bytes_received_ok': False,
+                    'stream_ready': False,
+                    'stream_live': False,
+                    'tracks': [],
+                    'error': 'override unreachable',
+                }
+            if lowered in {'offline', 'missing', 'not_found'}:
+                return {
+                    'reachable': True,
+                    'exists': False,
+                    'ready': False,
+                    'has_h264': False,
+                    'bytes_received': 0,
+                    'bytes_received_ok': False,
+                    'stream_ready': False,
+                    'stream_live': False,
+                    'tracks': [],
+                    'error': None,
+                }
+
+        parsed = parse_mediamtx_path_payload(override if isinstance(override, dict) else {})
+        return {
+            'reachable': True,
+            'exists': parsed['exists'],
+            'ready': parsed['ready'],
+            'has_h264': parsed['has_h264'],
+            'bytes_received': parsed['bytes_received'],
+            'bytes_received_ok': parsed['bytes_received_ok'],
+            'stream_ready': parsed['stream_ready'],
+            'stream_live': parsed['stream_ready'],
+            'tracks': parsed['tracks'],
+            'error': None,
+        }
+
+    def fetch_mediamtx_path_state(raw_board_name, now=None, force_refresh=False):
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        def update_bytes_live_state(key, state):
+            bytes_state = app_state['mediamtx_bytes_state']
+            previous = bytes_state.get(key)
+            bytes_received = state.get('bytes_received')
+            media_seen_at = None
+
+            if state.get('stream_ready') and bytes_received is not None and bytes_received > 0:
+                if previous is None or bytes_received > previous.get('bytes_received', -1):
+                    media_seen_at = now
+                else:
+                    media_seen_at = previous.get('media_seen_at')
+
+                bytes_state[key] = {
+                    'bytes_received': bytes_received,
+                    'media_seen_at': media_seen_at,
+                }
+            elif previous is not None:
+                media_seen_at = previous.get('media_seen_at')
+
+            if media_seen_at is not None:
+                stale_seconds = max(float(app.config['STREAM_STALE_SECONDS']), float(app.config['MEDIAMTX_BYTES_STALE_SECONDS']))
+                state['stream_live'] = bool(state.get('stream_ready')) and (now - media_seen_at).total_seconds() <= stale_seconds
+            else:
+                state['stream_live'] = False
+
+            return state
+
+        override = resolve_mediamtx_override(raw_board_name)
+        if override is not None:
+            return update_bytes_live_state(board_key(raw_board_name), dict(override))
+
+        key = board_key(raw_board_name)
+        cache = app_state['mediamtx_status_cache']
+        ttl_seconds = float(app.config['MEDIAMTX_STATUS_CACHE_TTL_SECONDS'])
+        if not force_refresh:
+            cached = cache.get(key)
+            if cached is not None and (time.monotonic() - cached['monotonic']) <= ttl_seconds:
+                return dict(cached['state'])
+
+        default_state = {
+            'reachable': False,
+            'exists': False,
+            'ready': False,
+            'has_h264': False,
+            'bytes_received': None,
+            'bytes_received_ok': False,
+            'stream_ready': False,
+            'stream_live': False,
+            'tracks': [],
+            'error': None,
+        }
+
+        control_url = build_mediamtx_control_url(raw_board_name)
+        if not control_url:
+            state = dict(default_state)
+            state['error'] = 'MEDIAMTX_CONTROL_API is not configured'
+            cache[key] = {'monotonic': time.monotonic(), 'state': state}
+            return state
+
+        try:
+            req = urllib_request.Request(
+                control_url,
+                headers={'Accept': 'application/json', 'User-Agent': 'RC-Car-Web/2.0'},
+                method='GET',
+            )
+            with urllib_request.urlopen(req, timeout=float(app.config['MEDIAMTX_CONTROL_TIMEOUT_SECONDS'])) as response:
+                status_code = int(getattr(response, 'status', 200) or 200)
+                body = response.read().decode('utf-8', errors='replace')
+
+            if status_code == 404:
+                state = dict(default_state)
+                state['reachable'] = True
+                state['exists'] = False
+            elif status_code >= 400:
+                state = dict(default_state)
+                state['error'] = f'HTTP {status_code}'
+            else:
+                payload = json.loads(body) if body else {}
+                parsed = parse_mediamtx_path_payload(payload)
+                state = {
+                    'reachable': True,
+                    'exists': parsed['exists'],
+                    'ready': parsed['ready'],
+                    'has_h264': parsed['has_h264'],
+                    'bytes_received': parsed['bytes_received'],
+                    'bytes_received_ok': parsed['bytes_received_ok'],
+                    'stream_ready': parsed['stream_ready'],
+                    'stream_live': False,
+                    'tracks': parsed['tracks'],
+                    'error': None,
+                }
+        except urllib_error.HTTPError as exc:
+            if int(getattr(exc, 'code', 500)) == 404:
+                state = dict(default_state)
+                state['reachable'] = True
+                state['exists'] = False
+            else:
+                state = dict(default_state)
+                state['error'] = f'HTTP {getattr(exc, "code", "error")}'
+        except Exception as exc:
+            state = dict(default_state)
+            state['error'] = str(exc)
+
+        state = update_bytes_live_state(key, state)
+
+        cache[key] = {'monotonic': time.monotonic(), 'state': dict(state)}
+        return state
+
     def parse_timestamp(raw_value):
         if not raw_value:
             return None
@@ -376,27 +638,14 @@ def create_app(test_config=None):
     def is_stream_live(raw_board_name=None, now=None):
         if now is None:
             now = datetime.now(timezone.utc)
-        stream_state = get_stream_state(raw_board_name)
-        last_stream_at = stream_state['last_stream_at']
-        if last_stream_at is None:
-            return False
-        return (now - last_stream_at).total_seconds() <= app.config['STREAM_STALE_SECONDS']
+        mediamtx_state = fetch_mediamtx_path_state(raw_board_name, now=now)
+        return bool(mediamtx_state['stream_live'])
 
     def is_stream_ready(raw_board_name=None, now=None):
         if now is None:
             now = datetime.now(timezone.utc)
-        stream_state = get_stream_state(raw_board_name)
-        if not is_stream_live(raw_board_name, now):
-            return False
-
-        frame_times = stream_state['stream_frame_times']
-        if not frame_times:
-            return False
-
-        window_seconds = float(app.config['STREAM_READY_WINDOW_SECONDS'])
-        cutoff = now - timedelta(seconds=window_seconds)
-        recent_frames = sum(1 for ts in frame_times if ts >= cutoff)
-        return recent_frames >= int(app.config['STREAM_READY_MIN_FRAMES'])
+        mediamtx_state = fetch_mediamtx_path_state(raw_board_name, now=now)
+        return bool(mediamtx_state['stream_ready'])
 
     def mark_stream_activity(raw_board_name=None):
         now = datetime.now(timezone.utc)
@@ -405,7 +654,12 @@ def create_app(test_config=None):
         stream_state['stream_frame_times'].append(now)
 
     def get_board_last_stream_at(raw_board_name):
-        return get_stream_state(raw_board_name)['last_stream_at']
+        state = app_state['mediamtx_bytes_state'].get(board_key(raw_board_name))
+        if state is not None:
+            return state.get('media_seen_at')
+        fetch_mediamtx_path_state(raw_board_name, force_refresh=True)
+        state = app_state['mediamtx_bytes_state'].get(board_key(raw_board_name))
+        return state.get('media_seen_at') if state else None
 
     def set_latest_stream_chunk(raw_board_name, data):
         stream_state = get_stream_state(raw_board_name)
@@ -740,16 +994,22 @@ def create_app(test_config=None):
             })
 
         board_name = active_session['name']
+        mediamtx_state = fetch_mediamtx_path_state(board_name)
 
         return jsonify({
             'status': 'ok',
             'active': True,
             'remaining_seconds': get_remaining_seconds(session['user_id'], active_session),
-            'stream_live': is_stream_live(board_name),
-            'stream_ready': is_stream_ready(board_name),
+            'stream_live': bool(mediamtx_state['stream_live']),
+            'stream_ready': bool(mediamtx_state['stream_ready']),
             'stream_visible': is_session_visible(active_session['id']),
             'billing_started': active_session['billing_started_at'] is not None,
             'device': board_name,
+            'mediamtx_reachable': bool(mediamtx_state['reachable']),
+            'mediamtx_path_exists': bool(mediamtx_state['exists']),
+            'mediamtx_has_h264': bool(mediamtx_state['has_h264']),
+            'mediamtx_bytes_received': mediamtx_state['bytes_received'],
+            'mediamtx_error': mediamtx_state['error'],
         })
 
     @app.route('/api/session/stream')
@@ -763,14 +1023,20 @@ def create_app(test_config=None):
 
         board_name = active_session['name']
         stream_urls = build_stream_urls(board_name)
+        mediamtx_state = fetch_mediamtx_path_state(board_name)
         return jsonify({
             'status': 'ok',
             'device': board_name,
             'stream_path': stream_urls['path'],
             'whep_url': stream_urls['whep_url'],
             'rtsp_url': stream_urls['rtsp_url'],
-            'ready': is_stream_ready(board_name),
-            'live': is_stream_live(board_name),
+            'ready': bool(mediamtx_state['stream_ready']),
+            'live': bool(mediamtx_state['stream_live']),
+            'mediamtx_reachable': bool(mediamtx_state['reachable']),
+            'mediamtx_path_exists': bool(mediamtx_state['exists']),
+            'mediamtx_has_h264': bool(mediamtx_state['has_h264']),
+            'mediamtx_bytes_received': mediamtx_state['bytes_received'],
+            'mediamtx_error': mediamtx_state['error'],
         })
 
     @app.route('/api/session/visibility', methods=['POST'])
@@ -796,14 +1062,17 @@ def create_app(test_config=None):
     @app.route('/api/stream/live')
     def stream_live_status():
         board_name = normalize_board_name(resolve_board_name())
+        mediamtx_state = fetch_mediamtx_path_state(board_name)
         return jsonify({
             'status': 'ok',
-            'live': is_stream_live(board_name),
-            'ready': is_stream_ready(board_name),
+            'live': bool(mediamtx_state['stream_live']),
+            'ready': bool(mediamtx_state['stream_ready']),
             'board_name': board_name,
-            'stale_after_seconds': app.config['STREAM_STALE_SECONDS'],
-            'ready_window_seconds': app.config['STREAM_READY_WINDOW_SECONDS'],
-            'ready_min_frames': app.config['STREAM_READY_MIN_FRAMES'],
+            'mediamtx_reachable': bool(mediamtx_state['reachable']),
+            'path_exists': bool(mediamtx_state['exists']),
+            'has_h264': bool(mediamtx_state['has_h264']),
+            'bytes_received': mediamtx_state['bytes_received'],
+            'error': mediamtx_state['error'],
         })
 
     @app.route('/api/session/start', methods=['POST'])

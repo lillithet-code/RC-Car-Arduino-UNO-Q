@@ -137,45 +137,147 @@ if [[ -n "$PLESK_DOMAIN" ]]; then
     fi
   done
 
+  backup_if_exists() {
+    local target="$1"
+    if sudo test -f "$target"; then
+      local stamp
+      stamp="$(date +%Y%m%d%H%M%S)"
+      sudo cp "$target" "${target}.bak.${stamp}"
+      echo "Backed up $target to ${target}.bak.${stamp}"
+    fi
+  }
+
+  upsert_marked_block() {
+    local target="$1"
+    local start_marker="$2"
+    local end_marker="$3"
+    local block_content="$4"
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    if sudo test -f "$target"; then
+      sudo awk -v start="$start_marker" -v end="$end_marker" '
+        $0 ~ start { skipping=1; next }
+        $0 ~ end { skipping=0; next }
+        !skipping { print }
+      ' "$target" > "$tmp_file"
+    fi
+
+    {
+      if [[ -s "$tmp_file" ]]; then
+        cat "$tmp_file"
+      fi
+      echo "$start_marker"
+      printf '%b' "$block_content"
+      echo "$end_marker"
+    } | sudo tee "$target" >/dev/null
+
+    rm -f "$tmp_file"
+  }
+
+  detect_plesk_frontend() {
+    local apache_active=0
+    local nginx_active=0
+    if command -v systemctl >/dev/null 2>&1; then
+      if systemctl is-active --quiet apache2 || systemctl is-active --quiet httpd; then
+        apache_active=1
+      fi
+      if systemctl is-active --quiet nginx || systemctl is-active --quiet sw-nginx; then
+        nginx_active=1
+      fi
+    fi
+
+    if [[ "$apache_active" -eq 1 && "$nginx_active" -eq 1 ]]; then
+      echo "hybrid"
+    elif [[ "$apache_active" -eq 1 ]]; then
+      echo "apache"
+    elif [[ "$nginx_active" -eq 1 ]]; then
+      echo "nginx"
+    else
+      echo "unknown"
+    fi
+  }
+
   if [[ -n "$PLESK_VHOST_DIR" ]]; then
     sudo mkdir -p "$PLESK_VHOST_DIR"
-    sudo tee "$PLESK_VHOST_DIR/vhost_nginx.conf" >/dev/null <<EOF_PLESK
-location / {
-    proxy_pass http://127.0.0.1:$PORT;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-}
+    FRONTEND_MODE="$(detect_plesk_frontend)"
+    echo "Detected Plesk frontend mode: $FRONTEND_MODE"
 
-location /ws/ {
-    proxy_pass http://127.0.0.1:$PORT;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host \$host;
-    proxy_read_timeout 86400;
-    proxy_send_timeout 86400;
-}
+    APACHE_PROXY_SNIPPET=''
+    APACHE_PROXY_SNIPPET+='<IfModule mod_proxy.c>\n'
+    APACHE_PROXY_SNIPPET+='    ProxyPreserveHost On\n'
+    APACHE_PROXY_SNIPPET+='    ProxyPass "/cars/" "http://127.0.0.1:8889/cars/" retry=0 timeout=120 keepalive=On\n'
+    APACHE_PROXY_SNIPPET+='    ProxyPassReverse "/cars/" "http://127.0.0.1:8889/cars/"\n'
+    APACHE_PROXY_SNIPPET+='</IfModule>\n'
 
+    APACHE_PROXY_SNIPPET+='<IfModule mod_headers.c>\n'
+    APACHE_PROXY_SNIPPET+='    RequestHeader set X-Forwarded-Proto "https" env=HTTPS\n'
+    APACHE_PROXY_SNIPPET+='</IfModule>\n'
+
+    APACHE_HTTP_CONF="$PLESK_VHOST_DIR/vhost.conf"
+    APACHE_HTTPS_CONF="$PLESK_VHOST_DIR/vhost_ssl.conf"
+    APACHE_MARKER_START='# BEGIN RC-CAR CARS PROXY'
+    APACHE_MARKER_END='# END RC-CAR CARS PROXY'
+
+    backup_if_exists "$APACHE_HTTP_CONF"
+    backup_if_exists "$APACHE_HTTPS_CONF"
+
+    upsert_marked_block "$APACHE_HTTP_CONF" "$APACHE_MARKER_START" "$APACHE_MARKER_END" "$APACHE_PROXY_SNIPPET"
+    upsert_marked_block "$APACHE_HTTPS_CONF" "$APACHE_MARKER_START" "$APACHE_MARKER_END" "$APACHE_PROXY_SNIPPET"
+    echo "Created Plesk Apache reverse-proxy snippets at:"
+    echo "  $APACHE_HTTP_CONF"
+    echo "  $APACHE_HTTPS_CONF"
+
+    if [[ "$FRONTEND_MODE" == "hybrid" || "$FRONTEND_MODE" == "nginx" ]]; then
+      NGINX_CONF="$PLESK_VHOST_DIR/vhost_nginx.conf"
+      NGINX_MARKER_START='# BEGIN RC-CAR CARS PROXY'
+      NGINX_MARKER_END='# END RC-CAR CARS PROXY'
+      backup_if_exists "$NGINX_CONF"
+      NGINX_PROXY_SNIPPET="$(cat <<'EOF_PLESK_NGINX'
 location /cars/ {
     proxy_pass http://127.0.0.1:8889/cars/;
     proxy_http_version 1.1;
-    proxy_set_header Host \$host;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 86400;
     proxy_send_timeout 86400;
 }
-EOF_PLESK
-    echo "Created Plesk reverse-proxy config at $PLESK_VHOST_DIR/vhost_nginx.conf"
+EOF_PLESK_NGINX
+)"
+      upsert_marked_block "$NGINX_CONF" "$NGINX_MARKER_START" "$NGINX_MARKER_END" "$NGINX_PROXY_SNIPPET"
+      echo "Updated optional nginx snippet at $NGINX_CONF"
+    fi
+
+    if command -v a2enmod >/dev/null 2>&1; then
+      sudo a2enmod proxy proxy_http headers >/dev/null || true
+    fi
+
+    if command -v apache2ctl >/dev/null 2>&1; then
+      echo "Running apache2ctl configtest before reload"
+      sudo apache2ctl configtest
+    elif command -v httpd >/dev/null 2>&1; then
+      echo "Running httpd configtest before reload"
+      sudo httpd -t
+    fi
 
     if command -v plesk >/dev/null 2>&1; then
-      sudo plesk sbin httpdmng --reconfigure-domain "$PLESK_DOMAIN" || true
+      sudo plesk sbin httpdmng --reconfigure-domain "$PLESK_DOMAIN"
+    fi
+
+    if command -v apache2ctl >/dev/null 2>&1; then
+      echo "Running apache2ctl configtest after Plesk reconfigure"
+      sudo apache2ctl configtest
+    elif command -v httpd >/dev/null 2>&1; then
+      echo "Running httpd configtest after Plesk reconfigure"
+      sudo httpd -t
     fi
 
     if command -v systemctl >/dev/null 2>&1; then
-      if systemctl is-active --quiet nginx; then
-        sudo systemctl reload nginx || true
-      elif systemctl list-unit-files | grep -q '^sw-nginx\\.service'; then
-        sudo systemctl reload sw-nginx || sudo service sw-nginx reload || true
+      if systemctl is-active --quiet apache2; then
+        sudo systemctl reload apache2
+      elif systemctl is-active --quiet httpd; then
+        sudo systemctl reload httpd
       fi
     fi
   else

@@ -1,7 +1,14 @@
 logLevel: info
 
 rtspAddress: :8554
-webrtcAddress: :8889
+webrtc: yes
+webrtcAddress: 127.0.0.1:8889
+webrtcAllowOrigin: '*'
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: yes
+webrtcAdditionalHosts:
+  - drive.kbob.org
 
 api: yes
 apiAddress: 127.0.0.1:9997
