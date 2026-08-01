@@ -152,8 +152,9 @@ def resolve_requested_camera_mode(env=None):
         or requested_width < 1280
         or requested_height < 720
     )
+    legacy_low_fps = requested_fps <= 2.0
 
-    if legacy_low_resolution:
+    if legacy_low_resolution or legacy_low_fps:
         requested_width = 1920
         requested_height = 1080
         requested_fps = max(requested_fps, 30.0)

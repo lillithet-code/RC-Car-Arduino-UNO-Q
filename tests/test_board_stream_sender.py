@@ -58,6 +58,18 @@ def test_requested_legacy_resolution_is_upgraded_to_1080p30():
     assert requested.fps == 30.0
 
 
+def test_requested_low_fps_is_upgraded_to_30fps():
+    requested = sender.resolve_requested_camera_mode({
+        'VIDEO_WIDTH': '1920',
+        'VIDEO_HEIGHT': '1080',
+        'FRAME_RATE': '1',
+        'H264_INPUT_FORMAT': 'mjpeg',
+    })
+    assert requested.width == 1920
+    assert requested.height == 1080
+    assert requested.fps == 30.0
+
+
 def test_ffmpeg_command_forces_browser_compatible_h264():
     mode = sender.CameraMode('mjpeg', 1920, 1080, 30.0)
     command = sender.build_publish_command(0, 'rtsp://example.test:8554/cars/RCCar1', mode)

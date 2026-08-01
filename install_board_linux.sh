@@ -55,6 +55,12 @@ resolve_video_config_value() {
         return
       fi
       ;;
+    FRAME_RATE)
+      if [[ "$existing_value" =~ ^[0-2](\.[0-9]+)?$ ]]; then
+        printf '%s' "$default_value"
+        return
+      fi
+      ;;
   esac
 
   printf '%s' "${existing_value:-$default_value}"
@@ -80,7 +86,7 @@ COMMAND_BRIDGE="$(resolve_config_value COMMAND_BRIDGE '')"
 ROUTER_SOCKET_PATH="$(resolve_config_value ROUTER_SOCKET_PATH /var/run/arduino-router.sock)"
 COMMAND_WS_URL="$(resolve_config_value COMMAND_WS_URL '')"
 COMMAND_WS_RETRY_SECONDS="$(resolve_config_value COMMAND_WS_RETRY_SECONDS 1.0)"
-FRAME_RATE="$(resolve_config_value FRAME_RATE 30)"
+FRAME_RATE="$(resolve_video_config_value FRAME_RATE 30)"
 VIDEO_WIDTH="$(resolve_video_config_value VIDEO_WIDTH 1920)"
 VIDEO_HEIGHT="$(resolve_video_config_value VIDEO_HEIGHT 1080)"
 VIDEO_MODE_AUTO="$(resolve_config_value VIDEO_MODE_AUTO 1)"
