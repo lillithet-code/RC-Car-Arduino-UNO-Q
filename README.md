@@ -3,13 +3,11 @@
 Remote RC car control stack with per-car session isolation, MediaMTX passthrough streaming, and board-safe command handling.
 
 ## What changed
-- H.264-over-HTTP chunk ingest is removed from the primary path.
-- UNO Q Linux now publishes H.264 once to MediaMTX (RTSP).
-- Browser playback uses WebRTC WHEP from MediaMTX (no server-side decode/re-encode).
-- Board command delivery is now persistent WebSocket (no 20 Hz polling loop).
+- UNO Q Linux publishes H.264 once to MediaMTX over RTSP.
+- Browser playback uses WebRTC WHEP from MediaMTX.
+- Board commands are delivered over a persistent WebSocket.
 - Command queues and stream state are scoped per car.
-- Control API now requires logged-in user ownership of an active session.
-- MCU firmware includes a 550 ms motion-command failsafe timeout.
+- Control actions require an authenticated session for the target car.
 
 ## Architecture
 - Flask app:
