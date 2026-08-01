@@ -29,9 +29,10 @@ STREAM_STATUS_POLL_SECONDS = max(0.3, float(os.environ.get('STREAM_STATUS_POLL_S
 STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
-H264_ENCODER = os.environ.get('H264_ENCODER', 'libx264').strip()
+H264_ENCODER = os.environ.get('H264_ENCODER', '').strip()
 H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
 H264_HW_ENCODERS = ('h264_v4l2m2m', 'h264_omx')
+H264_FALLBACK_ENCODER = 'libx264'
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
@@ -147,23 +148,47 @@ def parse_v4l2_modes(output):
     return unique_modes
 
 
+def detect_available_ffmpeg_encoders():
+    try:
+        result = subprocess.run(
+            [FFMPEG_BIN, '-hide_banner', '-encoders'],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    encoders = []
+    for line in (result.stdout or '').splitlines():
+        match = re.search(r'^\s*[A-Z]\s+(\S+)\s+', line)
+        if match:
+            encoders.append(match.group(1))
+    return encoders
+
+
 def resolve_h264_encoder(available_encoders=None):
-    candidates = list(available_encoders or [])
-    if not candidates:
-        candidates = [H264_ENCODER]
+    explicit_encoder = (H264_ENCODER or '').strip()
+    candidates = [encoder for encoder in (available_encoders or detect_available_ffmpeg_encoders()) if (encoder or '').strip()]
 
-    preferred = []
-    for encoder in candidates:
-        normalized = (encoder or '').strip()
-        if not normalized:
-            continue
-        if normalized in H264_HW_ENCODERS:
-            preferred.append(normalized)
+    if explicit_encoder:
+        if explicit_encoder in candidates:
+            return explicit_encoder
+        return explicit_encoder
 
-    if preferred:
-        return preferred[0]
+    for candidate in candidates:
+        if candidate in H264_HW_ENCODERS:
+            return candidate
 
-    return candidates[0] if candidates else H264_ENCODER
+    for candidate in candidates:
+        if candidate == H264_FALLBACK_ENCODER:
+            return candidate
+
+    return H264_FALLBACK_ENCODER
 
 
 def resolve_requested_camera_mode(env=None):
@@ -489,7 +514,11 @@ def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
     if camera_mode is None:
         camera_mode = resolve_requested_camera_mode()
 
-    chosen_encoder = resolve_h264_encoder([H264_ENCODER])
+    chosen_encoder = resolve_h264_encoder()
+    print(
+        f'ffmpeg encoder selection: requested={H264_ENCODER or "<auto>"} resolved={chosen_encoder}',
+        file=sys.stderr,
+    )
     command = [
         FFMPEG_BIN,
         '-hide_banner',
@@ -527,7 +556,11 @@ def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
 
 def start_publisher(video_device_index, rtsp_url, camera_mode):
     command = build_publish_command(video_device_index, rtsp_url, camera_mode)
-    print(f'starting MediaMTX publish: {" ".join(command)}')
+    chosen_encoder = command[command.index('-c:v') + 1]
+    print(
+        f'starting MediaMTX publish: encoder={chosen_encoder} mode={camera_mode.input_format} '
+        f'{camera_mode.width}x{camera_mode.height}@{camera_mode.fps:g}'
+    )
     return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
 
 
