@@ -210,8 +210,11 @@ sync_runtime_files() {
   mkdir -p "$target_dir"
   for relative_path in board_stream_sender.py board_commands.py requirements.txt; do
     local source_file="$source_dir/$relative_path"
+    local target_file="$target_dir/$relative_path"
     if [[ -f "$source_file" ]]; then
-      cp "$source_file" "$target_dir/$relative_path"
+      if [[ "$source_file" != "$target_file" ]]; then
+        cp "$source_file" "$target_file"
+      fi
     fi
   done
 }
@@ -302,9 +305,15 @@ cat > "$BOARD_DIR/start_board.sh" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$DIR/.venv/bin/activate"
+if [[ -f "$DIR/.venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$DIR/.venv/bin/activate"
+fi
 set -a
-source "$DIR/.env"
+if [[ -f "$DIR/.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$DIR/.env"
+fi
 set +a
 export PYTHONUNBUFFERED=1
 python3 -u "$DIR/board_stream_sender.py" &
