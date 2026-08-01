@@ -72,6 +72,7 @@ export_install_defaults() {
   export SERVER_URL="${SERVER_URL:-https://drive.kbob.org}"
   export SERVER_APP_DIR="${SERVER_APP_DIR:-/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q}"
   export BOARD_DIR="${BOARD_DIR:-/home/arduino/rc-car-arduino-uno-q}"
+  export LEGACY_BOARD_DIR="${LEGACY_BOARD_DIR:-/home/arduino/RC-Car-Arduino-UNO-Q}"
   export BOARD_NAME="${BOARD_NAME:-RCCar1}"
 }
 

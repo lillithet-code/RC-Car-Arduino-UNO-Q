@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BOARD_DIR="${BOARD_DIR:-$HOME/rc-car-arduino-uno-q}"
+LEGACY_BOARD_DIR="${LEGACY_BOARD_DIR:-$HOME/RC-Car-Arduino-UNO-Q}"
 VENV_DIR="${VENV_DIR:-$BOARD_DIR/.venv}"
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
@@ -193,6 +194,19 @@ autodetect_first_working_video_device() {
   return 1
 }
 
+migrate_legacy_board_dir() {
+  if [[ "$BOARD_DIR" == "$LEGACY_BOARD_DIR" ]]; then
+    return 0
+  fi
+
+  if [[ -d "$LEGACY_BOARD_DIR" && ! -e "$BOARD_DIR" ]]; then
+    mkdir -p "$(dirname "$BOARD_DIR")"
+    mv "$LEGACY_BOARD_DIR" "$BOARD_DIR"
+    echo "Moved legacy board checkout from $LEGACY_BOARD_DIR to $BOARD_DIR"
+  fi
+}
+
+migrate_legacy_board_dir
 mkdir -p "$BOARD_DIR"
 
 sync_runtime_files() {
