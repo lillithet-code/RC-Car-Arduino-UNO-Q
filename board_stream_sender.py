@@ -77,27 +77,85 @@ def list_video_device_indices():
     for path in paths:
         match = re.match(r'^/dev/video(\d+)$', path)
         if match:
-            indices.append(int(match.group(1)))
+            index = int(match.group(1))
+            if is_capture_video_device(index):
+                indices.append(index)
     return indices
+
+
+def is_capture_video_device(device_index):
+    device = f'/dev/video{device_index}'
+    try:
+        result = subprocess.run(
+            ['v4l2-ctl', '-d', device, '--all'],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except FileNotFoundError:
+        # If v4l2-ctl is not available, keep backward-compatible behavior.
+        return True
+    except Exception:
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    details = (result.stdout or '').lower()
+    return 'video capture' in details
+
+
+def ffmpeg_probe_video_device(device_index):
+    device = f'/dev/video{device_index}'
+    try:
+        result = subprocess.run(
+            [
+                FFMPEG_BIN,
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-f', 'v4l2',
+                '-i', device,
+                '-frames:v', '1',
+                '-f', 'null',
+                '-',
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return False
+
+    return result.returncode == 0
 
 
 def probe_video_device(device_index):
     backend = cv2.CAP_V4L2 if hasattr(cv2, 'CAP_V4L2') else 0
-    cap = cv2.VideoCapture(device_index, backend)
-    if not cap.isOpened():
+
+    # Some boards expose capture devices that OpenCV cannot open by numeric index
+    # but can open by explicit path.
+    for source in (f'/dev/video{device_index}', device_index):
+        cap = cv2.VideoCapture(source, backend)
+        if not cap.isOpened():
+            cap.release()
+            continue
+
+        ok = False
+        for _ in range(12):
+            ret, _ = cap.read()
+            if ret:
+                ok = True
+                break
+            time.sleep(0.05)
+
         cap.release()
-        return False
+        if ok:
+            return True
 
-    ok = False
-    for _ in range(12):
-        ret, _ = cap.read()
-        if ret:
-            ok = True
-            break
-        time.sleep(0.05)
-
-    cap.release()
-    return ok
+    # Fallback probe for environments where OpenCV capture backends are flaky.
+    return ffmpeg_probe_video_device(device_index)
 
 
 def resolve_working_video_device(preferred_index=None):
