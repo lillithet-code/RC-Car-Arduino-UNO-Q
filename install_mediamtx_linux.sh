@@ -52,6 +52,10 @@ webrtcAdditionalHosts:
   - ${WEBRTC_ADDITIONAL_HOST}
 api: yes
 apiAddress: 127.0.0.1:9997
+
+paths:
+  all_others:
+    source: publisher
 EOF
 
 sudo tee /etc/systemd/system/mediamtx.service >/dev/null <<EOF
