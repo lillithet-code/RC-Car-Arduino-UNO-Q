@@ -199,6 +199,14 @@ EOF_ENV
 sudo chown "$RUN_USER":"$RUN_USER" "$APP_DIR/.env"
 sudo chmod 600 "$APP_DIR/.env"
 
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  if ! grep -q '^BOARD_TOKEN=' "$SCRIPT_DIR/.env" 2>/dev/null; then
+    printf '\nBOARD_TOKEN=%s\n' "$BOARD_TOKEN" >> "$SCRIPT_DIR/.env"
+  else
+    sed -i "s|^BOARD_TOKEN=.*|BOARD_TOKEN=$BOARD_TOKEN|" "$SCRIPT_DIR/.env"
+  fi
+fi
+
 if [[ -n "$PLESK_DOMAIN" ]]; then
   PLESK_VHOST_DIR=""
   for candidate in \

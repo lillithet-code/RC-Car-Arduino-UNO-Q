@@ -238,6 +238,14 @@ EOF
 sudo chown "$BOARD_RUN_USER":"$BOARD_RUN_USER" "$BOARD_DIR/.env"
 sudo chmod 600 "$BOARD_DIR/.env"
 
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  if ! grep -q '^BOARD_TOKEN=' "$SCRIPT_DIR/.env" 2>/dev/null; then
+    printf '\nBOARD_TOKEN=%s\n' "$BOARD_TOKEN" >> "$SCRIPT_DIR/.env"
+  else
+    sed -i "s|^BOARD_TOKEN=.*|BOARD_TOKEN=$BOARD_TOKEN|" "$SCRIPT_DIR/.env"
+  fi
+fi
+
 cat > "$BOARD_DIR/start_board.sh" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail

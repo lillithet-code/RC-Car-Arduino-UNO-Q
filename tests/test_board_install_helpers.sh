@@ -37,4 +37,24 @@ if [[ "$BOARD_TOKEN" != "server-shared-token" ]]; then
   exit 1
 fi
 
+BOARD_TOKEN=""
+BOARD_DIR="$TEST_ROOT"
+SERVER_ENV_FILE=""
+SCRIPT_DIR="$TEST_ROOT"
+mkdir -p "$TEST_ROOT/.tmp_repo"
+cat > "$TEST_ROOT/.tmp_repo/.env" <<'EOF'
+BOARD_TOKEN=repo-checkout-token
+EOF
+
+derived_token="$(derive_board_token "$TEST_ROOT/.tmp_repo")"
+if [[ -z "$derived_token" ]]; then
+  echo "expected derived token from repository checkout" >&2
+  exit 1
+fi
+
+if [[ "$derived_token" != "repo-checkout-token" ]]; then
+  echo "expected repo-checkout-token from repository checkout" >&2
+  exit 1
+fi
+
 echo "token selection passed"
