@@ -30,6 +30,35 @@ resolve_config_value() {
   printf '%s' "${existing_value:-$default_value}"
 }
 
+resolve_video_config_value() {
+  local key="$1"
+  local default_value="$2"
+  local supplied_value="${!key:-}"
+  if [[ -n "$supplied_value" ]]; then
+    printf '%s' "$supplied_value"
+    return
+  fi
+
+  local existing_value
+  existing_value="$(read_existing_env_value "$key" 2>/dev/null || true)"
+  case "$key" in
+    VIDEO_WIDTH)
+      if [[ "$existing_value" == "800" ]]; then
+        printf '%s' "$default_value"
+        return
+      fi
+      ;;
+    VIDEO_HEIGHT)
+      if [[ "$existing_value" == "600" ]]; then
+        printf '%s' "$default_value"
+        return
+      fi
+      ;;
+  esac
+
+  printf '%s' "${existing_value:-$default_value}"
+}
+
 discover_board_token() {
   if select_board_token; then
     return 0
@@ -51,8 +80,8 @@ ROUTER_SOCKET_PATH="$(resolve_config_value ROUTER_SOCKET_PATH /var/run/arduino-r
 COMMAND_WS_URL="$(resolve_config_value COMMAND_WS_URL '')"
 COMMAND_WS_RETRY_SECONDS="$(resolve_config_value COMMAND_WS_RETRY_SECONDS 1.0)"
 FRAME_RATE="$(resolve_config_value FRAME_RATE 30)"
-VIDEO_WIDTH="$(resolve_config_value VIDEO_WIDTH 1920)"
-VIDEO_HEIGHT="$(resolve_config_value VIDEO_HEIGHT 1080)"
+VIDEO_WIDTH="$(resolve_video_config_value VIDEO_WIDTH 1920)"
+VIDEO_HEIGHT="$(resolve_video_config_value VIDEO_HEIGHT 1080)"
 VIDEO_MODE_AUTO="$(resolve_config_value VIDEO_MODE_AUTO 1)"
 VIDEO_DEVICE_AUTO_RECOVER="$(resolve_config_value VIDEO_DEVICE_AUTO_RECOVER 1)"
 STREAM_STATUS_POLL_SECONDS="$(resolve_config_value STREAM_STATUS_POLL_SECONDS 1.0)"
@@ -165,6 +194,21 @@ autodetect_first_working_video_device() {
 }
 
 mkdir -p "$BOARD_DIR"
+
+sync_runtime_files() {
+  local source_dir="${SCRIPT_DIR:-$PWD}"
+  local target_dir="$BOARD_DIR"
+
+  mkdir -p "$target_dir"
+  for relative_path in board_stream_sender.py board_commands.py requirements.txt; do
+    local source_file="$source_dir/$relative_path"
+    if [[ -f "$source_file" ]]; then
+      cp "$source_file" "$target_dir/$relative_path"
+    fi
+  done
+}
+
+sync_runtime_files
 cd "$BOARD_DIR"
 
 if command -v apt-get >/dev/null 2>&1; then
