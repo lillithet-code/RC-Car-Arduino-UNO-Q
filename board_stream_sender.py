@@ -31,6 +31,7 @@ VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
 H264_ENCODER = os.environ.get('H264_ENCODER', 'libx264').strip()
 H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
+H264_HW_ENCODERS = ('h264_v4l2m2m', 'h264_omx')
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
@@ -92,6 +93,7 @@ def parse_v4l2_modes(output):
     modes = []
     current_format = None
     current_size = None
+    current_fps = None
 
     for raw_line in (output or '').splitlines():
         line = raw_line.strip()
@@ -99,25 +101,31 @@ def parse_v4l2_modes(output):
         if format_match:
             current_format = normalize_input_format(format_match.group(1))
             current_size = None
+            current_fps = None
             continue
 
         size_match = re.search(r'Size:\s+Discrete\s+(\d+)x(\d+)', line, re.IGNORECASE)
         if size_match:
             current_size = (int(size_match.group(1)), int(size_match.group(2)))
+            current_fps = None
             continue
 
         stepwise_match = re.search(r'Size:\s+Stepwise\s+(\d+)x(\d+)\s*-\s*(\d+)x(\d+)', line, re.IGNORECASE)
         if stepwise_match:
             min_width, min_height, max_width, max_height = [int(stepwise_match.group(i)) for i in (1, 2, 3, 4)]
-            current_size = (min_width, min_height)
-            if max_width >= min_width and max_height >= min_height:
-                modes.append(CameraMode(
-                    input_format=current_format,
-                    width=max_width,
-                    height=max_height,
-                    fps=30.0,
-                ))
-            current_size = None
+            current_size = (max_width, max_height)
+            current_fps = None
+            continue
+
+        interval_match = re.search(r'Interval:\s+Discrete\s+([0-9]+(?:\.[0-9]+)?)s\s*\(([0-9]+(?:\.[0-9]+)?)\s+fps\)', line, re.IGNORECASE)
+        if interval_match and current_format and current_size:
+            current_fps = float(interval_match.group(2))
+            modes.append(CameraMode(
+                input_format=current_format,
+                width=current_size[0],
+                height=current_size[1],
+                fps=current_fps,
+            ))
             continue
 
         fps_match = re.search(r'\(([0-9]+(?:\.[0-9]+)?)\s+fps\)', line, re.IGNORECASE)
@@ -137,6 +145,25 @@ def parse_v4l2_modes(output):
             seen.add(key)
             unique_modes.append(mode)
     return unique_modes
+
+
+def resolve_h264_encoder(available_encoders=None):
+    candidates = list(available_encoders or [])
+    if not candidates:
+        candidates = [H264_ENCODER]
+
+    preferred = []
+    for encoder in candidates:
+        normalized = (encoder or '').strip()
+        if not normalized:
+            continue
+        if normalized in H264_HW_ENCODERS:
+            preferred.append(normalized)
+
+    if preferred:
+        return preferred[0]
+
+    return candidates[0] if candidates else H264_ENCODER
 
 
 def resolve_requested_camera_mode(env=None):
@@ -461,6 +488,8 @@ def stop_publisher(process, reason):
 def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
     if camera_mode is None:
         camera_mode = resolve_requested_camera_mode()
+
+    chosen_encoder = resolve_h264_encoder([H264_ENCODER])
     command = [
         FFMPEG_BIN,
         '-hide_banner',
@@ -472,7 +501,7 @@ def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
         '-framerate', f'{camera_mode.fps:g}',
         '-i', f'/dev/video{video_device_index}',
         '-an',
-        '-c:v', H264_ENCODER,
+        '-c:v', chosen_encoder,
         '-g', str(max(1, H264_GOP)),
         '-bf', '0',
         '-b:v', H264_BITRATE,
@@ -480,7 +509,7 @@ def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
         '-bufsize', H264_BUFSIZE,
     ]
 
-    if H264_ENCODER == 'libx264':
+    if chosen_encoder == 'libx264':
         command.extend([
             '-pix_fmt', 'yuv420p',
             '-profile:v', H264_PROFILE,

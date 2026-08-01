@@ -30,6 +30,24 @@ def test_camera_mode_selection_prefers_smooth_video_for_driving():
     assert selected == sender.CameraMode('mjpeg', 800, 600, 30.0)
 
 
+def test_parse_v4l2_modes_uses_interval_fps_for_stepwise_ranges():
+    sample = """
+ioctl: VIDIOC_ENUM_FMT
+    Type: Video Capture
+
+    [0]: 'MJPG' (Motion-JPEG, compressed)
+        Size: Stepwise 1280x720 - 1920x1080 with step 1/1
+            Interval: Discrete 0.067s (15.000 fps)
+"""
+    modes = sender.parse_v4l2_modes(sample)
+    assert sender.CameraMode('mjpeg', 1920, 1080, 15.0) in modes
+
+
+def test_resolve_h264_encoder_prefers_hw_encoder_when_available():
+    selected = sender.resolve_h264_encoder(['h264_v4l2m2m', 'libx264'])
+    assert selected == 'h264_v4l2m2m'
+
+
 def test_camera_mode_selection_handles_stepwise_v4l2_ranges():
     sample = """
 ioctl: VIDIOC_ENUM_FMT
