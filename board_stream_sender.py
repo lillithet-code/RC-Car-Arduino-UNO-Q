@@ -50,7 +50,6 @@ def resolve_input_format():
     if direct:
         return direct
 
-    # Backward compatibility with installer/env files that still use the plural key.
     legacy = (os.environ.get('H264_INPUT_FORMATS') or '').strip().lower()
     if legacy:
         first = legacy.split(',')[0].strip()
