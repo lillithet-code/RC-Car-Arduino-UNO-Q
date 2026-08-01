@@ -31,10 +31,10 @@ def test_camera_mode_selection_prefers_smooth_video_for_driving():
 
 
 def test_ffmpeg_command_forces_browser_compatible_h264():
-    mode = sender.CameraMode('mjpeg', 800, 600, 30.0)
+    mode = sender.CameraMode('mjpeg', 1920, 1080, 30.0)
     command = sender.build_publish_command(0, 'rtsp://example.test:8554/cars/RCCar1', mode)
     assert command[command.index('-pix_fmt') + 1] == 'yuv420p'
     assert command[command.index('-profile:v') + 1] == 'baseline'
     assert command[command.index('-bf') + 1] == '0'
-    assert command[command.index('-video_size') + 1] == '800x600'
+    assert command[command.index('-video_size') + 1] == '1920x1080'
     assert command[command.index('-framerate') + 1] == '30'
