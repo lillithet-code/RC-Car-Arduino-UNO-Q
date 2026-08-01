@@ -66,7 +66,8 @@ export_install_defaults() {
   export MEDIAMTX_WEBRTC_ADDITIONAL_HOST="${MEDIAMTX_WEBRTC_ADDITIONAL_HOST:-drive.kbob.org}"
   export SERVER_URL="${SERVER_URL:-https://drive.kbob.org}"
   export SERVER_APP_DIR="${SERVER_APP_DIR:-/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q}"
-  export BOARD_DIR="${BOARD_DIR:-/home/user/rc-car-arduino-uno-q}"
+  export BOARD_DIR="${BOARD_DIR:-/home/arduino/rc-car-arduino-uno-q}"
+  export BOARD_NAME="${BOARD_NAME:-RCCar1}"
 }
 
 run_git_pull() {

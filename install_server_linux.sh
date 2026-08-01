@@ -208,6 +208,8 @@ if [[ -n "$PLESK_DOMAIN" ]]; then
     APACHE_PROXY_SNIPPET+='    ProxyPreserveHost On\n'
     APACHE_PROXY_SNIPPET+='    ProxyPass "/cars/" "http://127.0.0.1:8889/cars/" retry=0 timeout=120 keepalive=On\n'
     APACHE_PROXY_SNIPPET+='    ProxyPassReverse "/cars/" "http://127.0.0.1:8889/cars/"\n'
+    APACHE_PROXY_SNIPPET+='    ProxyPass "/" "http://127.0.0.1:'"$PORT"'/" retry=0 timeout=120 keepalive=On\n'
+    APACHE_PROXY_SNIPPET+='    ProxyPassReverse "/" "http://127.0.0.1:'"$PORT"'/"\n'
     APACHE_PROXY_SNIPPET+='</IfModule>\n'
 
     APACHE_PROXY_SNIPPET+='<IfModule mod_headers.c>\n'
@@ -233,13 +235,23 @@ if [[ -n "$PLESK_DOMAIN" ]]; then
       NGINX_MARKER_START='# BEGIN RC-CAR CARS PROXY'
       NGINX_MARKER_END='# END RC-CAR CARS PROXY'
       backup_if_exists "$NGINX_CONF"
-      NGINX_PROXY_SNIPPET="$(cat <<'EOF_PLESK_NGINX'
+      NGINX_PROXY_SNIPPET="$(cat <<EOF_PLESK_NGINX
 location /cars/ {
     proxy_pass http://127.0.0.1:8889/cars/;
     proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 86400;
+    proxy_send_timeout 86400;
+}
+
+location / {
+    proxy_pass http://127.0.0.1:$PORT/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_read_timeout 86400;
     proxy_send_timeout 86400;
 }
