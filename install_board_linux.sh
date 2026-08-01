@@ -110,7 +110,14 @@ cd "$BOARD_DIR"
 
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
-  sudo apt-get install -y python3 python3-pip python3-venv python3-dev build-essential libgl1 libglib2.0-0 ffmpeg
+  sudo apt-get install -y python3 python3-pip python3-venv python3-dev build-essential libgl1 libglib2.0-0 ffmpeg v4l-utils
+fi
+
+if command -v getent >/dev/null 2>&1 && getent group video >/dev/null 2>&1; then
+  if ! id -nG "$USER" | tr ' ' '\n' | grep -qx 'video'; then
+    echo "Adding $USER to video group for camera device access"
+    sudo usermod -aG video "$USER" || true
+  fi
 fi
 
 if command -v docker >/dev/null 2>&1; then

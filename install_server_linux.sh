@@ -208,6 +208,8 @@ if [[ -n "$PLESK_DOMAIN" ]]; then
     APACHE_PROXY_SNIPPET+='    ProxyPreserveHost On\n'
     APACHE_PROXY_SNIPPET+='    ProxyPass "/cars/" "http://127.0.0.1:8889/cars/" retry=0 timeout=120 keepalive=On\n'
     APACHE_PROXY_SNIPPET+='    ProxyPassReverse "/cars/" "http://127.0.0.1:8889/cars/"\n'
+    APACHE_PROXY_SNIPPET+='    ProxyPass "/ws/" "ws://127.0.0.1:'"$PORT"'/ws/" retry=0 timeout=120 keepalive=On\n'
+    APACHE_PROXY_SNIPPET+='    ProxyPassReverse "/ws/" "ws://127.0.0.1:'"$PORT"'/ws/"\n'
     APACHE_PROXY_SNIPPET+='    ProxyPass "/" "http://127.0.0.1:'"$PORT"'/" retry=0 timeout=120 keepalive=On\n'
     APACHE_PROXY_SNIPPET+='    ProxyPassReverse "/" "http://127.0.0.1:'"$PORT"'/"\n'
     APACHE_PROXY_SNIPPET+='</IfModule>\n'
@@ -255,6 +257,18 @@ location / {
     proxy_read_timeout 86400;
     proxy_send_timeout 86400;
 }
+
+location /ws/ {
+  proxy_pass http://127.0.0.1:$PORT/ws/;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade \$http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host \$host;
+  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto \$scheme;
+  proxy_read_timeout 86400;
+  proxy_send_timeout 86400;
+}
 EOF_PLESK_NGINX
 )"
       upsert_marked_block "$NGINX_CONF" "$NGINX_MARKER_START" "$NGINX_MARKER_END" "$NGINX_PROXY_SNIPPET"
@@ -262,7 +276,7 @@ EOF_PLESK_NGINX
     fi
 
     if command -v a2enmod >/dev/null 2>&1; then
-      sudo a2enmod proxy proxy_http headers >/dev/null || true
+      sudo a2enmod proxy proxy_http proxy_wstunnel headers >/dev/null || true
     fi
 
     if command -v apache2ctl >/dev/null 2>&1; then
