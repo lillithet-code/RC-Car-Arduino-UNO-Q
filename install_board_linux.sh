@@ -80,6 +80,36 @@ if [[ -z "$BOARD_TOKEN" || "$BOARD_TOKEN" == "dev-board-token" ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+resolve_board_token() {
+  if [[ -n "${BOARD_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  local candidate
+  local token_value
+  local candidates=(
+    "$BOARD_DIR/.env"
+    "$SCRIPT_DIR/.env"
+    "$HOME/.env"
+    "$PWD/.env"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if token_value="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
+      BOARD_TOKEN="$token_value"
+      export BOARD_TOKEN
+      return 0
+    fi
+  done
+
+  BOARD_TOKEN="${BOARD_TOKEN:-dev-board-token}"
+  export BOARD_TOKEN
+}
+
+resolve_board_token
+
 if [[ -z "$COMMAND_BRIDGE" && -S "$ROUTER_SOCKET_PATH" ]]; then
   COMMAND_BRIDGE="rpc://$ROUTER_SOCKET_PATH"
 fi
@@ -164,6 +194,8 @@ fi
 if [[ -z "$H264_INPUT_FORMAT" ]]; then
   H264_INPUT_FORMAT="$H264_INPUT_FORMATS"
 fi
+
+resolve_board_token
 
 cat > "$BOARD_DIR/.env" <<EOF
 SERVER_URL=$SERVER_URL

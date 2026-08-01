@@ -94,6 +94,33 @@ if ! id "$RUN_USER" >/dev/null 2>&1; then
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="${SOURCE_DIR:-$SCRIPT_DIR}"
+
+resolve_board_token() {
+  if [[ -n "${BOARD_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  local candidate
+  local token_value
+  local candidates=(
+    "$APP_DIR/.env"
+    "$SCRIPT_DIR/.env"
+    "$HOME/.env"
+    "$PWD/.env"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if token_value="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
+      BOARD_TOKEN="$token_value"
+      export BOARD_TOKEN
+      return 0
+    fi
+  done
+
+  BOARD_TOKEN="${BOARD_TOKEN:-dev-board-token}"
+  export BOARD_TOKEN
+}
+
 mkdir -p "$APP_DIR"
 
 if [[ -n "$PLESK_DOMAIN" ]]; then
@@ -132,6 +159,7 @@ if [[ ! -f "$APP_DIR/requirements.txt" ]]; then
 fi
 
 cd "$APP_DIR"
+resolve_board_token
 
 echo "Installing application for domain: $PLESK_DOMAIN"
 echo "Application path: $APP_DIR"
