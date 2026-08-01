@@ -139,6 +139,33 @@ def parse_v4l2_modes(output):
     return unique_modes
 
 
+def resolve_requested_camera_mode(env=None):
+    source = os.environ if env is None else env
+
+    requested_width = int(source.get('VIDEO_WIDTH', str(VIDEO_WIDTH)))
+    requested_height = int(source.get('VIDEO_HEIGHT', str(VIDEO_HEIGHT)))
+    requested_fps = float(source.get('FRAME_RATE', str(FRAME_RATE)))
+    requested_format = normalize_input_format(source.get('H264_INPUT_FORMAT') or H264_INPUT_FORMAT)
+
+    legacy_low_resolution = (
+        (requested_width, requested_height) in {(800, 600), (640, 480)}
+        or requested_width < 1280
+        or requested_height < 720
+    )
+
+    if legacy_low_resolution:
+        requested_width = 1920
+        requested_height = 1080
+        requested_fps = max(requested_fps, 30.0)
+
+    return CameraMode(
+        input_format=requested_format,
+        width=requested_width,
+        height=requested_height,
+        fps=requested_fps,
+    )
+
+
 def read_v4l2_modes(video_device_index):
     device = f'/dev/video{video_device_index}'
     try:
@@ -231,12 +258,7 @@ def choose_camera_mode(modes, requested_mode):
 
 
 def resolve_camera_mode(video_device_index):
-    requested = CameraMode(
-        input_format=normalize_input_format(H264_INPUT_FORMAT),
-        width=VIDEO_WIDTH,
-        height=VIDEO_HEIGHT,
-        fps=FRAME_RATE,
-    )
+    requested = resolve_requested_camera_mode()
     modes = read_v4l2_modes(video_device_index)
     if modes is None:
         return requested
@@ -437,12 +459,7 @@ def stop_publisher(process, reason):
 
 def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
     if camera_mode is None:
-        camera_mode = CameraMode(
-            input_format=normalize_input_format(H264_INPUT_FORMAT),
-            width=VIDEO_WIDTH,
-            height=VIDEO_HEIGHT,
-            fps=FRAME_RATE,
-        )
+        camera_mode = resolve_requested_camera_mode()
     command = [
         FFMPEG_BIN,
         '-hide_banner',
