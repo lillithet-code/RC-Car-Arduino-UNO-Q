@@ -107,6 +107,20 @@ def parse_v4l2_modes(output):
             current_size = (int(size_match.group(1)), int(size_match.group(2)))
             continue
 
+        stepwise_match = re.search(r'Size:\s+Stepwise\s+(\d+)x(\d+)\s*-\s*(\d+)x(\d+)', line, re.IGNORECASE)
+        if stepwise_match:
+            min_width, min_height, max_width, max_height = [int(stepwise_match.group(i)) for i in (1, 2, 3, 4)]
+            current_size = (min_width, min_height)
+            if max_width >= min_width and max_height >= min_height:
+                modes.append(CameraMode(
+                    input_format=current_format,
+                    width=max_width,
+                    height=max_height,
+                    fps=30.0,
+                ))
+            current_size = None
+            continue
+
         fps_match = re.search(r'\(([0-9]+(?:\.[0-9]+)?)\s+fps\)', line, re.IGNORECASE)
         if fps_match and current_format and current_size:
             modes.append(CameraMode(
@@ -174,6 +188,15 @@ def choose_camera_mode(modes, requested_mode):
     if exact:
         return exact[0]
 
+    for mode in candidates:
+        if mode.width >= requested_mode.width and mode.height >= requested_mode.height:
+            return CameraMode(
+                input_format=requested_mode.input_format,
+                width=requested_mode.width,
+                height=requested_mode.height,
+                fps=min(requested_mode.fps, mode.fps),
+            )
+
     # Driving benefits more from a smooth frame rate than a larger, slow frame.
     minimum_smooth_fps = min(max(requested_mode.fps, 1.0), 25.0)
     smooth = [mode for mode in candidates if mode.fps >= minimum_smooth_fps]
@@ -183,7 +206,14 @@ def choose_camera_mode(modes, requested_mode):
             if mode.width <= requested_mode.width and mode.height <= requested_mode.height
         ]
         pool = within_requested_size or smooth
-        return max(pool, key=lambda mode: (mode.width * mode.height, mode.fps))
+        return max(
+            pool,
+            key=lambda mode: (
+                mode.width * mode.height,
+                mode.width / max(1, mode.height),
+                mode.fps,
+            ),
+        )
 
     # If the camera cannot reach a smooth rate, select its fastest usable mode.
     within_requested_size = [
@@ -191,7 +221,14 @@ def choose_camera_mode(modes, requested_mode):
         if mode.width <= requested_mode.width and mode.height <= requested_mode.height
     ]
     pool = within_requested_size or candidates
-    return max(pool, key=lambda mode: (mode.fps, mode.width * mode.height))
+    return max(
+        pool,
+        key=lambda mode: (
+            mode.fps,
+            mode.width * mode.height,
+            mode.width / max(1, mode.height),
+        ),
+    )
 
 
 def resolve_camera_mode(video_device_index):

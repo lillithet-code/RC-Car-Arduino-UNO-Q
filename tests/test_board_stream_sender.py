@@ -30,6 +30,22 @@ def test_camera_mode_selection_prefers_smooth_video_for_driving():
     assert selected == sender.CameraMode('mjpeg', 800, 600, 30.0)
 
 
+def test_camera_mode_selection_handles_stepwise_v4l2_ranges():
+    sample = """
+ioctl: VIDIOC_ENUM_FMT
+    Type: Video Capture
+
+    [0]: 'MJPG' (Motion-JPEG, compressed)
+        Size: Stepwise 128x128 - 1920x1920 with step 1/1
+            Interval: Discrete 0.033s (30.000 fps)
+"""
+    requested = sender.CameraMode('mjpeg', 1920, 1080, 30.0)
+    selected = sender.choose_camera_mode(sender.parse_v4l2_modes(sample), requested)
+    assert selected.width == 1920
+    assert selected.height == 1080
+    assert selected.fps == 30.0
+
+
 def test_ffmpeg_command_forces_browser_compatible_h264():
     mode = sender.CameraMode('mjpeg', 1920, 1080, 30.0)
     command = sender.build_publish_command(0, 'rtsp://example.test:8554/cars/RCCar1', mode)
