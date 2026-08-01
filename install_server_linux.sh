@@ -16,31 +16,82 @@ else
 fi
 
 VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
-SECRET_KEY="${SECRET_KEY:-change-me}"
-BOARD_TOKEN="${BOARD_TOKEN:-dev-board-token}"
-DATABASE_URL="${DATABASE_URL:-sqlite:///$APP_DIR/app.db}"
-STREAM_PROFILE="${STREAM_PROFILE:-0}"
-BOARD_POLL_URL="${BOARD_POLL_URL:-}"
-BOARD_POLL_INTERVAL_SECONDS="${BOARD_POLL_INTERVAL_SECONDS:-2.0}"
-BOARD_POLL_TIMEOUT_SECONDS="${BOARD_POLL_TIMEOUT_SECONDS:-1.5}"
-BOARD_ACTIVE_STALE_SECONDS="${BOARD_ACTIVE_STALE_SECONDS:-8.0}"
-STREAM_STALE_SECONDS="${STREAM_STALE_SECONDS:-6.0}"
-STREAM_LOSS_GRACE_SECONDS="${STREAM_LOSS_GRACE_SECONDS:-30.0}"
-STREAM_CROP_BOTTOM_PX="${STREAM_CROP_BOTTOM_PX:-2}"
-STREAM_JPEG_QUALITY="${STREAM_JPEG_QUALITY:-65}"
-H264_INGEST_QUEUE_MAX="${H264_INGEST_QUEUE_MAX:-8}"
-MEDIAMTX_RTSP_BASE="${MEDIAMTX_RTSP_BASE:-}"
-MEDIAMTX_WHEP_BASE="${MEDIAMTX_WHEP_BASE:-}"
-MEDIAMTX_STREAM_PREFIX="${MEDIAMTX_STREAM_PREFIX:-cars}"
-if [[ -n "$PLESK_DOMAIN" ]]; then
-  HOST="${HOST:-127.0.0.1}"
-else
-  HOST="${HOST:-0.0.0.0}"
+
+read_existing_env_value() {
+  local key="$1"
+  local env_file="$APP_DIR/.env"
+  [[ -f "$env_file" ]] || return 1
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$env_file"
+}
+
+generate_secure_value() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+  else
+    python3 -c 'import secrets; print(secrets.token_hex(32))'
+  fi
+}
+
+resolve_config_value() {
+  local key="$1"
+  local default_value="$2"
+  local supplied_value="${!key:-}"
+  if [[ -n "$supplied_value" ]]; then
+    printf '%s' "$supplied_value"
+    return
+  fi
+  local existing_value
+  existing_value="$(read_existing_env_value "$key" 2>/dev/null || true)"
+  printf '%s' "${existing_value:-$default_value}"
+}
+
+SECRET_KEY="${SECRET_KEY:-$(read_existing_env_value SECRET_KEY 2>/dev/null || true)}"
+BOARD_TOKEN="${BOARD_TOKEN:-$(read_existing_env_value BOARD_TOKEN 2>/dev/null || true)}"
+if [[ -z "$SECRET_KEY" || "$SECRET_KEY" == "change-me" || "$SECRET_KEY" == "dev-secret-key" ]]; then
+  SECRET_KEY="$(generate_secure_value)"
+  echo "Generated a new SECRET_KEY"
 fi
-PORT="${PORT:-8000}"
-GUNICORN_WORKERS="${GUNICORN_WORKERS:-1}"
-GUNICORN_THREADS="${GUNICORN_THREADS:-8}"
+if [[ -z "$BOARD_TOKEN" || "$BOARD_TOKEN" == "dev-board-token" ]]; then
+  BOARD_TOKEN="$(generate_secure_value)"
+  echo "Generated a new BOARD_TOKEN; use this server .env value when installing the board"
+fi
+DATABASE_URL="$(resolve_config_value DATABASE_URL "sqlite:///$APP_DIR/app.db")"
+STREAM_PROFILE="$(resolve_config_value STREAM_PROFILE 0)"
+BOARD_POLL_URL="$(resolve_config_value BOARD_POLL_URL '')"
+BOARD_POLL_INTERVAL_SECONDS="$(resolve_config_value BOARD_POLL_INTERVAL_SECONDS 2.0)"
+BOARD_POLL_TIMEOUT_SECONDS="$(resolve_config_value BOARD_POLL_TIMEOUT_SECONDS 1.5)"
+BOARD_ACTIVE_STALE_SECONDS="$(resolve_config_value BOARD_ACTIVE_STALE_SECONDS 8.0)"
+STREAM_STALE_SECONDS="$(resolve_config_value STREAM_STALE_SECONDS 6.0)"
+STREAM_LOSS_GRACE_SECONDS="$(resolve_config_value STREAM_LOSS_GRACE_SECONDS 30.0)"
+STREAM_CROP_BOTTOM_PX="$(resolve_config_value STREAM_CROP_BOTTOM_PX 2)"
+STREAM_JPEG_QUALITY="$(resolve_config_value STREAM_JPEG_QUALITY 65)"
+H264_INGEST_QUEUE_MAX="$(resolve_config_value H264_INGEST_QUEUE_MAX 8)"
+MEDIAMTX_RTSP_BASE="$(resolve_config_value MEDIAMTX_RTSP_BASE '')"
+MEDIAMTX_WHEP_BASE="$(resolve_config_value MEDIAMTX_WHEP_BASE '')"
+MEDIAMTX_STREAM_PREFIX="$(resolve_config_value MEDIAMTX_STREAM_PREFIX cars)"
+if [[ -n "$PLESK_DOMAIN" ]]; then
+  HOST="$(resolve_config_value HOST 127.0.0.1)"
+else
+  HOST="$(resolve_config_value HOST 0.0.0.0)"
+fi
+PORT="$(resolve_config_value PORT 8000)"
+GUNICORN_WORKERS="$(resolve_config_value GUNICORN_WORKERS 1)"
+GUNICORN_THREADS="$(resolve_config_value GUNICORN_THREADS 8)"
+RUN_USER="${RUN_USER:-}"
+if [[ -z "$RUN_USER" && -n "${PLESK_WEB_ROOT:-}" && -d "$PLESK_WEB_ROOT" ]]; then
+  WEB_ROOT_OWNER="$(stat -c '%U' "$PLESK_WEB_ROOT" 2>/dev/null || true)"
+  if [[ -n "$WEB_ROOT_OWNER" && "$WEB_ROOT_OWNER" != "root" ]]; then
+    RUN_USER="$WEB_ROOT_OWNER"
+  fi
+fi
+if [[ -z "$RUN_USER" && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  RUN_USER="$SUDO_USER"
+fi
 RUN_USER="${RUN_USER:-$(id -un)}"
+if ! id "$RUN_USER" >/dev/null 2>&1; then
+  echo "Error: RUN_USER does not exist: $RUN_USER" >&2
+  exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="${SOURCE_DIR:-$SCRIPT_DIR}"
 mkdir -p "$APP_DIR"
@@ -90,13 +141,6 @@ if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get install -y python3 python3-pip python3-venv python3-dev build-essential libgl1 libglib2.0-0 curl ffmpeg apt-transport-https gnupg lsb-release
 fi
 
-if command -v docker >/dev/null 2>&1; then
-  echo "Removing Docker to free space..."
-  sudo systemctl stop docker 2>/dev/null || true
-  sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-  sudo apt-get autoremove -y 2>/dev/null || true
-fi
-
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --upgrade pip
 "$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt"
@@ -124,6 +168,8 @@ PORT=$PORT
 GUNICORN_WORKERS=$GUNICORN_WORKERS
 GUNICORN_THREADS=$GUNICORN_THREADS
 EOF_ENV
+sudo chown "$RUN_USER":"$RUN_USER" "$APP_DIR/.env"
+sudo chmod 600 "$APP_DIR/.env"
 
 if [[ -n "$PLESK_DOMAIN" ]]; then
   PLESK_VHOST_DIR=""
@@ -276,7 +322,7 @@ EOF_PLESK_NGINX
     fi
 
     if command -v a2enmod >/dev/null 2>&1; then
-      sudo a2enmod proxy proxy_http proxy_wstunnel headers >/dev/null || true
+      sudo a2enmod proxy proxy_http proxy_wstunnel headers >/dev/null
     fi
 
     if command -v apache2ctl >/dev/null 2>&1; then

@@ -5,7 +5,7 @@ MODE="${1:-${MODE:-}}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_REMOTE="${REPO_REMOTE:-origin}"
 SKIP_GIT_PULL="${SKIP_GIT_PULL:-0}"
-CONFIG_FILE="${CONFIG_FILE:-install_unified.conf}"
+CONFIG_FILE="${CONFIG_FILE:-install_unified.local.conf}"
 
 if [[ -z "$MODE" ]]; then
   echo "Usage: $0 <server|board>" >&2
@@ -17,8 +17,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 load_config() {
+  local defaults_path="$SCRIPT_DIR/install_unified.conf"
   local conf_path="$SCRIPT_DIR/$CONFIG_FILE"
-  if [[ -f "$conf_path" ]]; then
+  if [[ -f "$defaults_path" ]]; then
+    # shellcheck disable=SC1090
+    source "$defaults_path"
+  fi
+  if [[ "$conf_path" != "$defaults_path" && -f "$conf_path" ]]; then
     # shellcheck disable=SC1090
     source "$conf_path"
   fi
@@ -107,7 +112,11 @@ install_server() {
 
 install_board() {
   echo "Running board install"
-  discover_board_token || true
+  if ! discover_board_token; then
+    echo "Error: no BOARD_TOKEN was supplied or found in an existing .env file." >&2
+    echo "Copy the BOARD_TOKEN from the server .env into install_unified.local.conf." >&2
+    exit 1
+  fi
   ./install_board_linux.sh
 
   echo "Restarting board service"

@@ -48,9 +48,13 @@ python app.py
 4. Configure server env so app can emit stream URLs:
 ```bash
 export MEDIAMTX_RTSP_BASE=rtsp://YOUR_SERVER_IP:8554
-export MEDIAMTX_WHEP_BASE=http://YOUR_SERVER_IP:8889
+export MEDIAMTX_WHEP_BASE=https://YOUR_PUBLIC_DOMAIN
 export MEDIAMTX_STREAM_PREFIX=cars
 ```
+
+Port `8889` is intentionally bound to loopback in the production installer. Apache/Plesk
+publishes MediaMTX under the same-origin `/cars/` path. Allow inbound TCP and UDP `8189`
+through the provider and host firewalls for WebRTC media.
 
 5. On board Linux side, run helpers:
 ```bash
@@ -63,18 +67,24 @@ python3 board_commands.py
 - `BOARD_TOKEN`: shared board token
 - `BOARD_NAME`: unique car identity
 - `VIDEO_DEVICE`: camera index or `/dev/videoN` or `auto`
+- `VIDEO_MODE_AUTO`: select the closest supported V4L2 mode when the requested mode is unavailable (default `1`)
+- `VIDEO_WIDTH`, `VIDEO_HEIGHT`, `FRAME_RATE`: preferred capture mode (defaults `800x600@30`)
+- `H264_ENCODER`: defaults to `libx264`; browser output is forced to H.264 baseline/yuv420p
 - `COMMAND_WS_URL`: optional explicit command WS URL
 - `MEDIAMTX_RTSP_URL`: optional fixed override target (if not using server-provided URL)
 
 ## Server-side variables
 - `BOARD_TOKEN`: shared board token
 - `MEDIAMTX_RTSP_BASE`: RTSP publish base, e.g. `rtsp://server:8554`
-- `MEDIAMTX_WHEP_BASE`: WebRTC/WHEP base, e.g. `http://server:8889`
+- `MEDIAMTX_WHEP_BASE`: public same-origin base, e.g. `https://drive.kbob.org`
 - `MEDIAMTX_STREAM_PREFIX`: path prefix, defaults to `cars`
 
 Per-car path format:
 - RTSP publish: `rtsp://server:8554/cars/<board_name>`
-- Browser WHEP: `http://server:8889/cars/<board_name>/whep`
+- Browser WHEP: `https://public-domain/cars/<board_name>/whep`
+
+Board API and command WebSocket requests authenticate with `Authorization: Bearer <BOARD_TOKEN>`.
+Tokens are not placed in query strings.
 
 ## Install scripts
 
@@ -87,10 +97,12 @@ MODE=server ./install_unified.sh
 MODE=board ./install_unified.sh
 ```
 
-Installer config defaults are in `install_unified.conf`.
-- Set repo/domain paths once.
+Installer defaults are in the tracked `install_unified.conf`. Put machine-specific overrides
+in the gitignored `install_unified.local.conf` so `git pull` remains clean.
+- Set repo/domain paths once in `install_unified.local.conf`.
 - `BOARD_TOKEN` is auto-discovered from existing `.env` files when possible.
-- If auto-discovery fails, set `BOARD_TOKEN` in `install_unified.conf`.
+- If auto-discovery fails, copy the server `.env` token into `install_unified.local.conf`.
+- The server installer preserves existing secrets and securely generates missing ones.
 
 Server app install:
 ```bash
@@ -103,4 +115,3 @@ Board install:
 ```
 
 MediaMTX config template is included in `mediamtx.yml`.
-

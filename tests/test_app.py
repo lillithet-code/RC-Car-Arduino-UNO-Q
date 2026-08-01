@@ -21,16 +21,18 @@ def client():
         'STREAM_READY_MIN_FRAMES': 1,
         'STREAM_READY_WINDOW_SECONDS': 2.0,
         'MEDIAMTX_TEST_PATH_STATES': {},
+        'BOARD_TOKEN': 'dev-board-token',
     })
     app.config['TESTING'] = True
     with app.test_client() as client:
+        client.environ_base['HTTP_AUTHORIZATION'] = 'Bearer dev-board-token'
         yield client
     os.close(db_fd)
     os.unlink(db_path)
 
 
 def mark_board_online(client, board_name):
-    response = client.get(f'/api/board/stream/status?token=dev-board-token&board_name={board_name}')
+    response = client.get(f'/api/board/stream/status?board_name={board_name}')
     assert response.status_code == 200
 
 
@@ -76,6 +78,18 @@ def test_register_and_login(client):
     }, follow_redirects=True)
     assert response.status_code == 200
     assert b'Welcome, alice' in response.data
+
+
+def test_device_registration_requires_board_token(client):
+    client.environ_base.pop('HTTP_AUTHORIZATION', None)
+    response = client.post('/api/devices/register', json={
+        'name': 'unauthorized-car',
+        'kind': 'arduino',
+        'location': 'garage',
+    })
+    assert response.status_code == 403
+    query_token_response = client.get('/api/board/stream/status?token=dev-board-token&board_name=legacy-car')
+    assert query_token_response.status_code == 403
 
 
 def test_inactive_user_is_logged_out_after_timeout(client):
@@ -304,6 +318,78 @@ def test_session_start_requires_stream_ready(client):
     payload = start_response.get_json()
     assert payload['status'] == 'error'
     assert payload['message'] == 'stream not ready'
+
+
+def test_session_start_rejects_ready_but_frozen_stream(client):
+    client.post('/register', data={
+        'username': 'frozen',
+        'password': 'secret123',
+        'email': 'frozen@example.com'
+    })
+    client.post('/login', data={
+        'username': 'frozen',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-frozen',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-frozen')
+    assert client.post('/request_car').status_code == 200
+
+    set_mediamtx_state(
+        client,
+        'rc-car-frozen',
+        ready=True,
+        has_h264=True,
+        bytes_received=5000,
+        stream_live=False,
+    )
+    status_payload = client.get('/api/session/status').get_json()
+    assert status_payload['stream_ready'] is True
+    assert status_payload['stream_live'] is False
+    assert status_payload['stream_operational'] is False
+
+    start_response = client.post('/api/session/start')
+    assert start_response.status_code == 409
+
+
+def test_billing_pauses_when_ready_stream_stops_receiving_bytes(client):
+    client.post('/register', data={
+        'username': 'stalled',
+        'password': 'secret123',
+        'email': 'stalled@example.com'
+    })
+    client.post('/login', data={
+        'username': 'stalled',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-stalled',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-stalled')
+    client.post('/request_car')
+    set_mediamtx_state(client, 'rc-car-stalled', bytes_received=1000, stream_live=True)
+    assert client.post('/api/session/start').status_code == 200
+
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE sessions SET last_billing_at = datetime('now', '-5 seconds') WHERE status = 'active'")
+        conn.commit()
+        conn.close()
+
+    before = client.get('/api/session/status').get_json()['remaining_seconds']
+    client.post('/api/session/visibility', json={'visible': True})
+    set_mediamtx_state(client, 'rc-car-stalled', bytes_received=1000, stream_live=False)
+    client.get('/')
+    after = client.get('/api/session/status').get_json()['remaining_seconds']
+    assert after == before
 
 
 def test_billing_pauses_when_stream_not_ready(client):
@@ -573,6 +659,9 @@ def test_dashboard_has_webrtc_setup_inflight_guard(client):
     html = response.data.decode('utf-8')
     assert 'let webRtcSetupInFlight = false;' in html
     assert 'if (webRtcSetupInFlight) {' in html
+    assert 'queuedIceCandidates.push(event.candidate);' in html
+    assert 'a=ice-pwd:${offerData.icePwd}' in html
+    assert "return [{ urls: 'stun:stun.l.google.com:19302' }]" not in html
 
 
 def test_request_car_allows_partial_session_when_balance_under_default(client):
@@ -665,7 +754,7 @@ def test_board_commands_are_exposed_for_the_board_client(client):
     response = client.post('/api/control', json={'action': 'forward'})
     assert response.status_code == 200
 
-    board_response = client.get('/api/board/command?token=dev-board-token&board_name=rc-car-otto')
+    board_response = client.get('/api/board/command?board_name=rc-car-otto')
     assert board_response.status_code == 200
     payload = board_response.get_json()
     assert payload['status'] == 'ok'
@@ -673,7 +762,7 @@ def test_board_commands_are_exposed_for_the_board_client(client):
 
 
 def test_board_stream_status_reflects_active_sessions(client):
-    inactive_response = client.get('/api/board/stream/status?token=dev-board-token&board_name=rc-car-ivy')
+    inactive_response = client.get('/api/board/stream/status?board_name=rc-car-ivy')
     assert inactive_response.status_code == 200
     inactive_payload = inactive_response.get_json()
     assert inactive_payload['status'] == 'ok'
@@ -697,7 +786,7 @@ def test_board_stream_status_reflects_active_sessions(client):
     mark_board_online(client, 'rc-car-ivy')
     client.post('/request_car')
 
-    active_response = client.get('/api/board/stream/status?token=dev-board-token&board_name=rc-car-ivy')
+    active_response = client.get('/api/board/stream/status?board_name=rc-car-ivy')
     assert active_response.status_code == 200
     active_payload = active_response.get_json()
     assert active_payload['status'] == 'ok'
@@ -746,3 +835,9 @@ def test_board_commands_map_to_serial_bytes(monkeypatch):
 
     assert board_commands.send_command('forward', port='/dev/ttyUSB0', baud_rate=115200)
     assert created[0].writes == [b'F']
+
+
+def test_board_websocket_url_does_not_expose_token():
+    url = board_commands.build_command_ws_url()
+    assert 'board_name=' in url
+    assert 'token=' not in url

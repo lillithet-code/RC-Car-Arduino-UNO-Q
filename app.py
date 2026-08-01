@@ -1,4 +1,5 @@
 import os
+import hmac
 import threading
 import time
 import re
@@ -93,7 +94,7 @@ def create_app(test_config=None):
     app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
     app.config['DATABASE_URL'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
     app.config['STREAM_MAX_QUEUE'] = int(os.environ.get('STREAM_MAX_QUEUE', '1'))
-    app.config['BOARD_TOKEN'] = os.environ.get('BOARD_TOKEN', 'dev-board-token')
+    app.config['BOARD_TOKEN'] = os.environ.get('BOARD_TOKEN', '').strip()
     app.config['SESSION_DURATION_SECONDS'] = int(os.environ.get('SESSION_DURATION_SECONDS', '300'))
     app.config['STREAM_STALE_SECONDS'] = float(os.environ.get('STREAM_STALE_SECONDS', '6.0'))
     app.config['STREAM_READY_WINDOW_SECONDS'] = max(1.0, float(os.environ.get('STREAM_READY_WINDOW_SECONDS', '2.0')))
@@ -220,7 +221,7 @@ def create_app(test_config=None):
             consumed_seconds = max(0, int(row['consumed_seconds'] or 0))
             last_billing_at = parse_timestamp(row['last_billing_at']) or billing_started_at
 
-            if is_stream_ready(device_name, now) and is_session_visible(row['id'], now):
+            if is_stream_operational(device_name, now) and is_session_visible(row['id'], now):
                 elapsed_seconds = max(0, int((now - last_billing_at).total_seconds()))
                 if elapsed_seconds > 0:
                     consumed_seconds = min(allocated_seconds, consumed_seconds + elapsed_seconds)
@@ -542,7 +543,12 @@ def create_app(test_config=None):
 
         override = resolve_mediamtx_override(raw_board_name)
         if override is not None:
-            return update_bytes_live_state(board_key(raw_board_name), dict(override))
+            # Tests and diagnostics can explicitly model a frozen path where
+            # ready remains true while bytes stop moving.
+            explicit_live = override.get('stream_live')
+            state = update_bytes_live_state(board_key(raw_board_name), dict(override))
+            state['stream_live'] = bool(explicit_live)
+            return state
 
         key = board_key(raw_board_name)
         cache = app_state['mediamtx_status_cache']
@@ -635,17 +641,21 @@ def create_app(test_config=None):
         board_name = (request.args.get('board_name') or request.headers.get('X-Board-Name') or '').strip()
         return board_name or None
 
-    def is_stream_live(raw_board_name=None, now=None):
-        if now is None:
-            now = datetime.now(timezone.utc)
-        mediamtx_state = fetch_mediamtx_path_state(raw_board_name, now=now)
-        return bool(mediamtx_state['stream_live'])
+    def board_request_is_authorized():
+        authorization = (request.headers.get('Authorization') or '').strip()
+        supplied_token = ''
+        if authorization.lower().startswith('bearer '):
+            supplied_token = authorization[7:].strip()
+        if not supplied_token:
+            supplied_token = (request.headers.get('X-Board-Token') or '').strip()
+        expected_token = str(app.config.get('BOARD_TOKEN') or '')
+        return bool(supplied_token and expected_token and hmac.compare_digest(supplied_token, expected_token))
 
-    def is_stream_ready(raw_board_name=None, now=None):
+    def is_stream_operational(raw_board_name=None, now=None):
         if now is None:
             now = datetime.now(timezone.utc)
         mediamtx_state = fetch_mediamtx_path_state(raw_board_name, now=now)
-        return bool(mediamtx_state['stream_ready'])
+        return bool(mediamtx_state['stream_ready'] and mediamtx_state['stream_live'])
 
     def mark_stream_activity(raw_board_name=None):
         now = datetime.now(timezone.utc)
@@ -941,9 +951,9 @@ def create_app(test_config=None):
     def control():
         if 'user_id' not in session:
             return redirect(url_for('login'))
-        db = get_db()
-        session_row = get_active_session(session['user_id'])
-        return render_template('control.html', session=session_row)
+        # The dashboard owns the single WHEP player and the controls. Keeping a
+        # second implementation here caused /control to show a placeholder.
+        return redirect(url_for('index'))
 
     @app.route('/release_car', methods=['POST'])
     def release_car():
@@ -990,6 +1000,7 @@ def create_app(test_config=None):
                 'remaining_seconds': max(0, int(user['balance'])) if user else 0,
                 'stream_live': False,
                 'stream_ready': False,
+                'stream_operational': False,
                 'billing_started': False,
             })
 
@@ -1002,6 +1013,7 @@ def create_app(test_config=None):
             'remaining_seconds': get_remaining_seconds(session['user_id'], active_session),
             'stream_live': bool(mediamtx_state['stream_live']),
             'stream_ready': bool(mediamtx_state['stream_ready']),
+            'stream_operational': bool(mediamtx_state['stream_ready'] and mediamtx_state['stream_live']),
             'stream_visible': is_session_visible(active_session['id']),
             'billing_started': active_session['billing_started_at'] is not None,
             'device': board_name,
@@ -1032,6 +1044,7 @@ def create_app(test_config=None):
             'rtsp_url': stream_urls['rtsp_url'],
             'ready': bool(mediamtx_state['stream_ready']),
             'live': bool(mediamtx_state['stream_live']),
+            'operational': bool(mediamtx_state['stream_ready'] and mediamtx_state['stream_live']),
             'mediamtx_reachable': bool(mediamtx_state['reachable']),
             'mediamtx_path_exists': bool(mediamtx_state['exists']),
             'mediamtx_has_h264': bool(mediamtx_state['has_h264']),
@@ -1067,6 +1080,7 @@ def create_app(test_config=None):
             'status': 'ok',
             'live': bool(mediamtx_state['stream_live']),
             'ready': bool(mediamtx_state['stream_ready']),
+            'operational': bool(mediamtx_state['stream_ready'] and mediamtx_state['stream_live']),
             'board_name': board_name,
             'mediamtx_reachable': bool(mediamtx_state['reachable']),
             'path_exists': bool(mediamtx_state['exists']),
@@ -1085,7 +1099,7 @@ def create_app(test_config=None):
             return jsonify({'status': 'error', 'message': 'no active session'}), 400
 
         board_name = active_session['name']
-        if not is_stream_ready(board_name):
+        if not is_stream_operational(board_name):
             return jsonify({'status': 'error', 'message': 'stream not ready'}), 409
 
         if active_session['billing_started_at'] is None:
@@ -1143,6 +1157,9 @@ def create_app(test_config=None):
 
     @app.route('/api/devices/register', methods=['POST'])
     def register_device():
+        if not board_request_is_authorized():
+            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
+
         payload = request.get_json(silent=True) or {}
         name = payload.get('name')
         kind = payload.get('kind', 'arduino')
@@ -1188,8 +1205,7 @@ def create_app(test_config=None):
 
     @sock.route('/ws/board/commands')
     def board_command_ws(ws):
-        token = request.args.get('token')
-        if token != app.config['BOARD_TOKEN']:
+        if not board_request_is_authorized():
             try:
                 ws.send(json.dumps({'status': 'error', 'message': 'invalid token'}))
             except Exception:
@@ -1228,8 +1244,7 @@ def create_app(test_config=None):
 
     @app.route('/api/board/command')
     def board_command():
-        token = request.args.get('token')
-        if token != app.config['BOARD_TOKEN']:
+        if not board_request_is_authorized():
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
         board_name = normalize_board_name(resolve_board_name())
@@ -1246,8 +1261,7 @@ def create_app(test_config=None):
 
     @app.route('/api/board/stream/status')
     def board_stream_status():
-        token = request.args.get('token')
-        if token != app.config['BOARD_TOKEN']:
+        if not board_request_is_authorized():
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
         board_name = normalize_board_name(resolve_board_name())
@@ -1283,8 +1297,7 @@ def create_app(test_config=None):
 
     @app.route('/api/board/stream/config')
     def board_stream_config():
-        token = request.args.get('token')
-        if token != app.config['BOARD_TOKEN']:
+        if not board_request_is_authorized():
             return jsonify({'status': 'error', 'message': 'invalid token'}), 403
 
         board_name = normalize_board_name(resolve_board_name())

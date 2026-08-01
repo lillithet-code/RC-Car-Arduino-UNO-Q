@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - exercised when websocket-client is mis
     create_connection = None
 
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
-BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
+BOARD_TOKEN = os.environ.get('BOARD_TOKEN', '').strip()
 SERIAL_PORT = os.environ.get('SERIAL_PORT', '/dev/ttyACM0')
 SERIAL_BAUD_RATE = int(os.environ.get('SERIAL_BAUD_RATE', '9600'))
 SERIAL_RETRY_SECONDS = float(os.environ.get('SERIAL_RETRY_SECONDS', '1.0'))
@@ -72,8 +72,14 @@ def build_command_ws_url():
 
     separator = '&' if '?' in base else '?'
     board_param = urllib_parse.quote(BOARD_NAME, safe='')
-    token_param = urllib_parse.quote(BOARD_TOKEN, safe='')
-    return f'{base}{separator}token={token_param}&board_name={board_param}'
+    return f'{base}{separator}board_name={board_param}'
+
+
+def board_request_headers(user_agent):
+    return {
+        'Authorization': f'Bearer {BOARD_TOKEN}',
+        'User-Agent': user_agent,
+    }
 
 
 def resolve_command_target():
@@ -255,7 +261,10 @@ def register_device():
     req = urllib_request.Request(
         url,
         data=payload,
-        headers={'Content-Type': 'application/json', 'User-Agent': 'RC-Car-Board/1.0'},
+        headers={
+            **board_request_headers('RC-Car-Board/2.0'),
+            'Content-Type': 'application/json',
+        },
         method='POST',
     )
     try:
@@ -270,10 +279,17 @@ def open_command_websocket():
     if create_connection is None:
         raise RuntimeError('websocket-client is required for command websocket transport')
     ws_url = build_command_ws_url()
-    return create_connection(ws_url, timeout=5)
+    return create_connection(
+        ws_url,
+        timeout=5,
+        header=[f'Authorization: Bearer {BOARD_TOKEN}'],
+    )
 
 
 def main():
+    if not BOARD_TOKEN or BOARD_TOKEN == 'dev-board-token':
+        raise SystemExit('BOARD_TOKEN must be configured with a non-default value')
+
     connection = None
     command_ws = None
 

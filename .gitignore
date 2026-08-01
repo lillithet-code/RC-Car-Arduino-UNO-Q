@@ -2,10 +2,12 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
 
 # Local/editor files
 .vscode/
 
-# Local runtime data
+# Local runtime and installer data
 app.db
 .env
+install_unified.local.conf

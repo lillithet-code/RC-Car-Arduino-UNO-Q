@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
@@ -15,14 +16,15 @@ import cv2
 
 
 SERVER_BASE_URL = os.environ.get('SERVER_URL', 'https://drive.kbob.org').rstrip('/')
-BOARD_TOKEN = os.environ.get('BOARD_TOKEN', 'dev-board-token')
+BOARD_TOKEN = os.environ.get('BOARD_TOKEN', '').strip()
 BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-1')
 BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
 VIDEO_DEVICE_SETTING = os.environ.get('VIDEO_DEVICE', 'auto').strip().lower()
 VIDEO_DEVICE_AUTO_RECOVER = os.environ.get('VIDEO_DEVICE_AUTO_RECOVER', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+VIDEO_MODE_AUTO = os.environ.get('VIDEO_MODE_AUTO', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '30'))
-VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1920'))
-VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '1080'))
+VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '800'))
+VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '600'))
 STREAM_STATUS_POLL_SECONDS = max(0.3, float(os.environ.get('STREAM_STATUS_POLL_SECONDS', '1.0')))
 STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
@@ -32,6 +34,15 @@ H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
+H264_PROFILE = os.environ.get('H264_PROFILE', 'baseline').strip()
+
+
+@dataclass(frozen=True)
+class CameraMode:
+    input_format: str
+    width: int
+    height: int
+    fps: float
 
 
 def resolve_input_format():
@@ -54,6 +65,168 @@ PUBLISH_RTSP_URL = os.environ.get('MEDIAMTX_RTSP_URL', '').strip()
 
 STREAM_CONFIG_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/config'
 DEVICE_REGISTER_ENDPOINT = f'{SERVER_BASE_URL}/api/devices/register'
+
+
+def board_request_headers(user_agent):
+    return {
+        'Authorization': f'Bearer {BOARD_TOKEN}',
+        'User-Agent': user_agent,
+    }
+
+
+def normalize_input_format(value):
+    normalized = (value or '').strip().lower()
+    aliases = {
+        'mjpg': 'mjpeg',
+        'jpeg': 'mjpeg',
+        'mjpeg': 'mjpeg',
+        'yuyv': 'yuyv422',
+        'yuy2': 'yuyv422',
+        'yuyv422': 'yuyv422',
+        'nv12': 'nv12',
+        'h264': 'h264',
+    }
+    return aliases.get(normalized, normalized)
+
+
+def parse_v4l2_modes(output):
+    modes = []
+    current_format = None
+    current_size = None
+
+    for raw_line in (output or '').splitlines():
+        line = raw_line.strip()
+        format_match = re.search(r"\[\d+\]:\s*'([^']+)'", line)
+        if format_match:
+            current_format = normalize_input_format(format_match.group(1))
+            current_size = None
+            continue
+
+        size_match = re.search(r'Size:\s+Discrete\s+(\d+)x(\d+)', line, re.IGNORECASE)
+        if size_match:
+            current_size = (int(size_match.group(1)), int(size_match.group(2)))
+            continue
+
+        fps_match = re.search(r'\(([0-9]+(?:\.[0-9]+)?)\s+fps\)', line, re.IGNORECASE)
+        if fps_match and current_format and current_size:
+            modes.append(CameraMode(
+                input_format=current_format,
+                width=current_size[0],
+                height=current_size[1],
+                fps=float(fps_match.group(1)),
+            ))
+
+    unique_modes = []
+    seen = set()
+    for mode in modes:
+        key = (mode.input_format, mode.width, mode.height, round(mode.fps, 3))
+        if key not in seen:
+            seen.add(key)
+            unique_modes.append(mode)
+    return unique_modes
+
+
+def read_v4l2_modes(video_device_index):
+    device = f'/dev/video{video_device_index}'
+    try:
+        result = subprocess.run(
+            ['v4l2-ctl', '-d', device, '--list-formats-ext'],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except FileNotFoundError:
+        print('v4l2-ctl not found; using configured camera mode without validation', file=sys.stderr)
+        return None
+    except Exception as exc:
+        print(f'camera capability probe failed: {exc}', file=sys.stderr)
+        return None
+
+    if result.returncode != 0:
+        stderr_tail = (result.stderr or '').strip()
+        raise RuntimeError(f'v4l2-ctl failed for {device}: {stderr_tail or "unknown error"}')
+
+    modes = parse_v4l2_modes(result.stdout)
+    if not modes:
+        raise RuntimeError(f'no discrete capture modes were reported for {device}')
+    return modes
+
+
+def choose_camera_mode(modes, requested_mode):
+    requested_format = normalize_input_format(requested_mode.input_format)
+    format_order = [requested_format, 'mjpeg', 'yuyv422', 'nv12', 'h264']
+    candidates = []
+    for input_format in format_order:
+        candidates = [mode for mode in modes if mode.input_format == input_format]
+        if candidates:
+            break
+
+    if not candidates:
+        return None
+
+    exact = [
+        mode for mode in candidates
+        if mode.width == requested_mode.width
+        and mode.height == requested_mode.height
+        and abs(mode.fps - requested_mode.fps) < 0.05
+    ]
+    if exact:
+        return exact[0]
+
+    # Driving benefits more from a smooth frame rate than a larger, slow frame.
+    minimum_smooth_fps = min(max(requested_mode.fps, 1.0), 25.0)
+    smooth = [mode for mode in candidates if mode.fps >= minimum_smooth_fps]
+    if smooth:
+        within_requested_size = [
+            mode for mode in smooth
+            if mode.width <= requested_mode.width and mode.height <= requested_mode.height
+        ]
+        pool = within_requested_size or smooth
+        return max(pool, key=lambda mode: (mode.width * mode.height, mode.fps))
+
+    # If the camera cannot reach a smooth rate, select its fastest usable mode.
+    within_requested_size = [
+        mode for mode in candidates
+        if mode.width <= requested_mode.width and mode.height <= requested_mode.height
+    ]
+    pool = within_requested_size or candidates
+    return max(pool, key=lambda mode: (mode.fps, mode.width * mode.height))
+
+
+def resolve_camera_mode(video_device_index):
+    requested = CameraMode(
+        input_format=normalize_input_format(H264_INPUT_FORMAT),
+        width=VIDEO_WIDTH,
+        height=VIDEO_HEIGHT,
+        fps=FRAME_RATE,
+    )
+    modes = read_v4l2_modes(video_device_index)
+    if modes is None:
+        return requested
+
+    selected = choose_camera_mode(modes, requested)
+    if selected is None:
+        available_formats = ', '.join(sorted({mode.input_format for mode in modes}))
+        raise RuntimeError(
+            f'camera /dev/video{video_device_index} does not provide a supported capture format; '
+            f'configured={requested.input_format}, available={available_formats or "none"}'
+        )
+
+    if selected != requested:
+        message = (
+            f'configured camera mode {requested.input_format} {requested.width}x{requested.height}@{requested.fps:g} '
+            f'is unsupported; selected {selected.input_format} {selected.width}x{selected.height}@{selected.fps:g}'
+        )
+        if not VIDEO_MODE_AUTO:
+            raise RuntimeError(message + '; set VIDEO_MODE_AUTO=1 or configure an exact supported mode')
+        print(message, file=sys.stderr)
+    else:
+        print(
+            f'camera mode validated: {selected.input_format} '
+            f'{selected.width}x{selected.height}@{selected.fps:g}'
+        )
+    return selected
 
 
 def parse_video_device_setting(value):
@@ -179,7 +352,10 @@ def register_device():
     req = urllib_request.Request(
         DEVICE_REGISTER_ENDPOINT,
         data=payload,
-        headers={'Content-Type': 'application/json', 'User-Agent': 'RC-Car-Board-Stream/2.0'},
+        headers={
+            **board_request_headers('RC-Car-Board-Stream/2.0'),
+            'Content-Type': 'application/json',
+        },
         method='POST',
     )
     try:
@@ -192,9 +368,8 @@ def register_device():
 
 def fetch_stream_config():
     board_name = urllib_parse.quote(BOARD_NAME, safe='')
-    token = urllib_parse.quote(BOARD_TOKEN, safe='')
-    url = f'{STREAM_CONFIG_ENDPOINT}?token={token}&board_name={board_name}'
-    req = urllib_request.Request(url, headers={'User-Agent': 'RC-Car-Board-Stream/2.0'})
+    url = f'{STREAM_CONFIG_ENDPOINT}?board_name={board_name}'
+    req = urllib_request.Request(url, headers=board_request_headers('RC-Car-Board-Stream/2.0'))
     try:
         with urllib_request.urlopen(req, timeout=3) as response:
             payload = json.loads(response.read().decode('utf-8'))
@@ -224,16 +399,23 @@ def stop_publisher(process, reason):
         print(f'publisher stop error ({reason}): {exc}', file=sys.stderr)
 
 
-def build_publish_command(video_device_index, rtsp_url):
+def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
+    if camera_mode is None:
+        camera_mode = CameraMode(
+            input_format=normalize_input_format(H264_INPUT_FORMAT),
+            width=VIDEO_WIDTH,
+            height=VIDEO_HEIGHT,
+            fps=FRAME_RATE,
+        )
     command = [
         FFMPEG_BIN,
         '-hide_banner',
         '-loglevel', 'error',
         '-fflags', 'nobuffer',
         '-f', 'v4l2',
-        '-input_format', H264_INPUT_FORMAT,
-        '-video_size', f'{VIDEO_WIDTH}x{VIDEO_HEIGHT}',
-        '-framerate', str(FRAME_RATE),
+        '-input_format', camera_mode.input_format,
+        '-video_size', f'{camera_mode.width}x{camera_mode.height}',
+        '-framerate', f'{camera_mode.fps:g}',
         '-i', f'/dev/video{video_device_index}',
         '-an',
         '-c:v', H264_ENCODER,
@@ -245,7 +427,12 @@ def build_publish_command(video_device_index, rtsp_url):
     ]
 
     if H264_ENCODER == 'libx264':
-        command.extend(['-preset', 'veryfast', '-tune', 'zerolatency'])
+        command.extend([
+            '-pix_fmt', 'yuv420p',
+            '-profile:v', H264_PROFILE,
+            '-preset', 'veryfast',
+            '-tune', 'zerolatency',
+        ])
 
     command.extend([
         '-rtsp_transport', 'tcp',
@@ -255,8 +442,8 @@ def build_publish_command(video_device_index, rtsp_url):
     return command
 
 
-def start_publisher(video_device_index, rtsp_url):
-    command = build_publish_command(video_device_index, rtsp_url)
+def start_publisher(video_device_index, rtsp_url, camera_mode):
+    command = build_publish_command(video_device_index, rtsp_url, camera_mode)
     print(f'starting MediaMTX publish: {" ".join(command)}')
     return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
 
@@ -282,49 +469,10 @@ def stream_ffmpeg_stderr(process, video_device_index, rtsp_url):
     thread.start()
 
 
-def v4l2_mode_probe(video_device_index):
-    device = f'/dev/video{video_device_index}'
-    if not os.path.exists(device):
-        return
-
-    try:
-        result = subprocess.run(
-            ['v4l2-ctl', '-d', device, '--list-formats-ext'],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except FileNotFoundError:
-        print('v4l2-ctl not found; skipping camera capability probe', file=sys.stderr)
-        return
-    except Exception as exc:
-        print(f'camera capability probe failed: {exc}', file=sys.stderr)
-        return
-
-    if result.returncode != 0:
-        stderr_tail = (result.stderr or '').strip()
-        print(f'v4l2-ctl probe failed for {device}: {stderr_tail or "unknown error"}', file=sys.stderr)
-        return
-
-    output = result.stdout or ''
-    fmt_ok = H264_INPUT_FORMAT.lower() in output.lower()
-    size_text = f'{VIDEO_WIDTH}x{VIDEO_HEIGHT}'
-    size_ok = size_text in output
-    fps_ok = f'{int(FRAME_RATE)}.000 fps' in output or f'{FRAME_RATE:.3f} fps' in output
-
-    print(
-        f'camera capability probe device={device} format={H264_INPUT_FORMAT} supported={fmt_ok} '
-        f'resolution={size_text} supported={size_ok} fps={FRAME_RATE} supported={fps_ok}'
-    )
-    if not (fmt_ok and size_ok and fps_ok):
-        print(
-            f'configured mode may be unsupported on {device}; inspect v4l2-ctl output before changing quality',
-            file=sys.stderr,
-        )
-
-
 def main():
+    if not BOARD_TOKEN or BOARD_TOKEN == 'dev-board-token':
+        raise SystemExit('BOARD_TOKEN must be configured with a non-default value')
+
     register_device()
 
     preferred_video_device, auto_video_select = parse_video_device_setting(VIDEO_DEVICE_SETTING)
@@ -369,7 +517,11 @@ def main():
 
         if stream_enabled and publish_url:
             now = time.monotonic()
-            should_probe = active_video_device is None or auto_video_select or VIDEO_DEVICE_AUTO_RECOVER
+            # A running FFmpeg process owns the V4L2 device. Probing it here can
+            # return EBUSY and incorrectly mark a healthy camera as unavailable.
+            should_probe = publisher_process is None and (
+                active_video_device is None or auto_video_select or VIDEO_DEVICE_AUTO_RECOVER
+            )
             if should_probe and now >= next_probe_at:
                 detected = resolve_working_video_device(active_video_device)
                 if detected != active_video_device:
@@ -384,8 +536,8 @@ def main():
 
             if publisher_process is None or active_publish_url != publish_url:
                 stop_publisher(publisher_process, 'reconfigure')
-                v4l2_mode_probe(active_video_device)
-                publisher_process = start_publisher(active_video_device, publish_url)
+                camera_mode = resolve_camera_mode(active_video_device)
+                publisher_process = start_publisher(active_video_device, publish_url, camera_mode)
                 stream_ffmpeg_stderr(publisher_process, active_video_device, publish_url)
                 active_publish_url = publish_url
 

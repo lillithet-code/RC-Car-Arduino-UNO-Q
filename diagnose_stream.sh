@@ -7,6 +7,12 @@ MEDIAMTX_API_BASE="${MEDIAMTX_API_BASE:-http://127.0.0.1:9997}"
 PATH_PREFIX="${MEDIAMTX_STREAM_PREFIX:-cars}"
 STREAM_PATH="${PATH_PREFIX}/${BOARD_NAME}"
 WHEP_URL="${PUBLIC_BASE_URL%/}/${STREAM_PATH}/whep"
+API_OUTPUT_FILE="$(mktemp)"
+WHEP_OUTPUT_FILE="$(mktemp)"
+cleanup() {
+  rm -f "$API_OUTPUT_FILE" "$WHEP_OUTPUT_FILE"
+}
+trap cleanup EXIT
 
 print_header() {
   echo
@@ -43,15 +49,15 @@ ss -luntp | grep -E '(:8000|:8554|:8889|:8189)\b' || true
 
 print_header "MediaMTX control API"
 API_URL="${MEDIAMTX_API_BASE%/}/v3/paths/get/${STREAM_PATH}"
-API_BODY="$(curl -sS --max-time 2 "$API_URL" || true)"
-API_CODE="$(curl -sS -o /tmp/rc-car-mediamtx-api.json -w '%{http_code}' --max-time 2 "$API_URL" || true)"
+API_CODE="$(curl -sS -o "$API_OUTPUT_FILE" -w '%{http_code}' --max-time 2 "$API_URL" || true)"
 echo "GET $API_URL -> HTTP $API_CODE"
-if [[ -s /tmp/rc-car-mediamtx-api.json ]]; then
-  cat /tmp/rc-car-mediamtx-api.json
-  python3 - <<'PY'
+if [[ -s "$API_OUTPUT_FILE" ]]; then
+  cat "$API_OUTPUT_FILE"
+  python3 - "$API_OUTPUT_FILE" <<'PY'
 import json
+import sys
 from pathlib import Path
-p = Path('/tmp/rc-car-mediamtx-api.json')
+p = Path(sys.argv[1])
 try:
     data = json.loads(p.read_text())
 except Exception as exc:
@@ -91,7 +97,7 @@ fi
 
 print_header "Public WHEP routing"
 echo "OPTIONS $WHEP_URL"
-curl -sS -D - -o /tmp/rc-car-whep-options.out -X OPTIONS --max-time 4 "$WHEP_URL" || true
+curl -sS -D - -o "$WHEP_OUTPUT_FILE" -X OPTIONS --max-time 4 "$WHEP_URL" || true
 
 print_header "RTSP reachability (from this host)"
 if command -v nc >/dev/null 2>&1; then
@@ -109,6 +115,16 @@ fi
 
 echo "UDP 8189 local socket check:"
 ss -lun | grep -E '(:8189)\b' || true
+echo "Note: local sockets do not prove public reachability; test inbound TCP and UDP 8189 from outside the server network."
+
+print_header "Published video codec"
+if command -v ffprobe >/dev/null 2>&1; then
+  ffprobe -v error -rtsp_transport tcp -select_streams v:0 \
+    -show_entries stream=codec_name,profile,pix_fmt,width,height,r_frame_rate \
+    -of json "rtsp://127.0.0.1:8554/$STREAM_PATH" || true
+else
+  echo "ffprobe not installed; skipping H.264 profile/pixel-format validation"
+fi
 
 print_header "Firewall checks"
 if command -v nft >/dev/null 2>&1; then
