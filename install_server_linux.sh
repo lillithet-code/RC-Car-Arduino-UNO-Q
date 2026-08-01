@@ -405,6 +405,9 @@ EOF_SERVICE
 sudo mv "$APP_DIR/rc-car-web.service" /etc/systemd/system/rc-car-web.service
 sudo systemctl daemon-reload
 sudo systemctl enable rc-car-web.service
+if command -v systemctl >/dev/null 2>&1; then
+  sudo systemctl restart rc-car-web.service >/dev/null 2>&1 || true
+fi
 
 cat <<EOF
 Server/Linux install completed.

@@ -11,10 +11,6 @@ if [[ -z "${BOARD_HOST}" ]]; then
   echo "Usage: ./deploy_board.sh user@board-host" >&2
   exit 1
 fi
-if [[ -z "$BOARD_TOKEN" || "$BOARD_TOKEN" == "dev-board-token" ]]; then
-  echo "Error: set BOARD_TOKEN to the same non-default token used by the server." >&2
-  exit 1
-fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

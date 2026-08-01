@@ -3,6 +3,7 @@ set -euo pipefail
 
 BOARD_DIR="${BOARD_DIR:-$HOME/rc-car-arduino-uno-q}"
 VENV_DIR="${VENV_DIR:-$BOARD_DIR/.venv}"
+SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
 read_existing_env_value() {
   local key="$1"
@@ -22,6 +23,38 @@ resolve_config_value() {
   local existing_value
   existing_value="$(read_existing_env_value "$key" 2>/dev/null || true)"
   printf '%s' "${existing_value:-$default_value}"
+}
+
+discover_board_token() {
+  local candidate
+  local token_value
+  local candidates=(
+    "$BOARD_DIR/.env"
+    "$SCRIPT_DIR/.env"
+    "$HOME/.env"
+    "$PWD/.env"
+  )
+
+  if [[ -n "${SERVER_APP_DIR:-}" ]]; then
+    candidates+=("$SERVER_APP_DIR/.env")
+  fi
+  if [[ -n "${SERVER_ENV_FILE:-}" ]]; then
+    candidates+=("$SERVER_ENV_FILE")
+  fi
+  if [[ -n "${PLESK_WEB_ROOT:-}" ]]; then
+    candidates+=("$PLESK_WEB_ROOT/rc-car-arduino-uno-q/.env")
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    if token_value="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
+      BOARD_TOKEN="$token_value"
+      export BOARD_TOKEN
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 SERVER_URL="$(resolve_config_value SERVER_URL https://drive.kbob.org)"
@@ -75,34 +108,27 @@ if ! id "$BOARD_RUN_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ -z "$BOARD_TOKEN" || "$BOARD_TOKEN" == "dev-board-token" ]]; then
-  echo "Error: BOARD_TOKEN must be set to the same non-default token used by the server." >&2
-  exit 1
+if [[ -n "$BOARD_TOKEN" && "$BOARD_TOKEN" != "dev-board-token" ]]; then
+  :
+elif [[ -f "$BOARD_DIR/.env" ]]; then
+  BOARD_TOKEN="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$BOARD_DIR/.env" 2>/dev/null || true)"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "$BOARD_TOKEN" || "$BOARD_TOKEN" == "dev-board-token" ]]; then
+  if ! discover_board_token; then
+    echo "Error: BOARD_TOKEN must be set to the same non-default token used by the server." >&2
+    exit 1
+  fi
+fi
 
 resolve_board_token() {
   if [[ -n "${BOARD_TOKEN:-}" ]]; then
     return 0
   fi
 
-  local candidate
-  local token_value
-  local candidates=(
-    "$BOARD_DIR/.env"
-    "$SCRIPT_DIR/.env"
-    "$HOME/.env"
-    "$PWD/.env"
-  )
-
-  for candidate in "${candidates[@]}"; do
-    if token_value="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
-      BOARD_TOKEN="$token_value"
-      export BOARD_TOKEN
-      return 0
-    fi
-  done
+  if discover_board_token; then
+    return 0
+  fi
 
   BOARD_TOKEN="${BOARD_TOKEN:-dev-board-token}"
   export BOARD_TOKEN
@@ -285,6 +311,9 @@ EOF3
 sudo mv "$BOARD_DIR/rc-car-board.service" /etc/systemd/system/rc-car-board.service
 sudo systemctl daemon-reload
 sudo systemctl enable rc-car-board.service
+if command -v systemctl >/dev/null 2>&1; then
+  sudo systemctl restart rc-car-board.service >/dev/null 2>&1 || true
+fi
 
 cat <<EOF
 Board/Linux install completed.
