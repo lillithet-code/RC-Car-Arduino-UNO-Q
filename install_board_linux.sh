@@ -5,6 +5,11 @@ BOARD_DIR="${BOARD_DIR:-$HOME/rc-car-arduino-uno-q}"
 VENV_DIR="${VENV_DIR:-$BOARD_DIR/.venv}"
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
+if [[ -f "$SCRIPT_DIR/board_install_helpers.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/board_install_helpers.sh"
+fi
+
 read_existing_env_value() {
   local key="$1"
   local env_file="$BOARD_DIR/.env"
@@ -26,34 +31,9 @@ resolve_config_value() {
 }
 
 discover_board_token() {
-  local candidate
-  local token_value
-  local candidates=(
-    "$BOARD_DIR/.env"
-    "$SCRIPT_DIR/.env"
-    "$HOME/.env"
-    "$PWD/.env"
-  )
-
-  if [[ -n "${SERVER_APP_DIR:-}" ]]; then
-    candidates+=("$SERVER_APP_DIR/.env")
+  if select_board_token; then
+    return 0
   fi
-  if [[ -n "${SERVER_ENV_FILE:-}" ]]; then
-    candidates+=("$SERVER_ENV_FILE")
-  fi
-  if [[ -n "${PLESK_WEB_ROOT:-}" ]]; then
-    candidates+=("$PLESK_WEB_ROOT/rc-car-arduino-uno-q/.env")
-  fi
-
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" ]] || continue
-    if token_value="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
-      BOARD_TOKEN="$token_value"
-      export BOARD_TOKEN
-      return 0
-    fi
-  done
-
   return 1
 }
 
