@@ -87,6 +87,11 @@ MODE=server ./install_unified.sh
 MODE=board ./install_unified.sh
 ```
 
+Installer config defaults are in `install_unified.conf`.
+- Set repo/domain paths once.
+- `BOARD_TOKEN` is auto-discovered from existing `.env` files when possible.
+- If auto-discovery fails, set `BOARD_TOKEN` in `install_unified.conf`.
+
 Server app install:
 ```bash
 ./install_server_linux.sh

@@ -5,6 +5,7 @@ MODE="${1:-${MODE:-}}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_REMOTE="${REPO_REMOTE:-origin}"
 SKIP_GIT_PULL="${SKIP_GIT_PULL:-0}"
+CONFIG_FILE="${CONFIG_FILE:-install_unified.conf}"
 
 if [[ -z "$MODE" ]]; then
   echo "Usage: $0 <server|board>" >&2
@@ -14,6 +15,59 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+load_config() {
+  local conf_path="$SCRIPT_DIR/$CONFIG_FILE"
+  if [[ -f "$conf_path" ]]; then
+    # shellcheck disable=SC1090
+    source "$conf_path"
+  fi
+}
+
+extract_token_from_env_file() {
+  local env_file="$1"
+  if [[ ! -f "$env_file" ]]; then
+    return 1
+  fi
+  awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$env_file"
+}
+
+discover_board_token() {
+  if [[ -n "${BOARD_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  local candidate
+  local candidates=(
+    "${SERVER_APP_DIR:-}/.env"
+    "${BOARD_DIR:-}/.env"
+    "/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q/.env"
+    "$HOME/rc-car-arduino-uno-q/.env"
+    "/home/user/rc-car-arduino-uno-q/.env"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    if token_value="$(extract_token_from_env_file "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
+      BOARD_TOKEN="$token_value"
+      export BOARD_TOKEN
+      echo "Discovered BOARD_TOKEN from $candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+export_install_defaults() {
+  export PLESK_DOMAIN="${PLESK_DOMAIN:-drive.kbob.org}"
+  export MEDIAMTX_WHEP_BASE="${MEDIAMTX_WHEP_BASE:-https://drive.kbob.org}"
+  export MEDIAMTX_RTSP_BASE="${MEDIAMTX_RTSP_BASE:-rtsp://drive.kbob.org:8554}"
+  export MEDIAMTX_WEBRTC_ADDITIONAL_HOST="${MEDIAMTX_WEBRTC_ADDITIONAL_HOST:-drive.kbob.org}"
+  export SERVER_URL="${SERVER_URL:-https://drive.kbob.org}"
+  export SERVER_APP_DIR="${SERVER_APP_DIR:-/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q}"
+  export BOARD_DIR="${BOARD_DIR:-/home/user/rc-car-arduino-uno-q}"
+}
 
 run_git_pull() {
   if [[ "$SKIP_GIT_PULL" == "1" ]]; then
@@ -35,6 +89,7 @@ run_git_pull() {
 
 install_server() {
   echo "Running server install"
+  discover_board_token || true
   ./install_server_linux.sh
 
   echo "Running MediaMTX install"
@@ -51,6 +106,7 @@ install_server() {
 
 install_board() {
   echo "Running board install"
+  discover_board_token || true
   ./install_board_linux.sh
 
   echo "Restarting board service"
@@ -62,6 +118,8 @@ install_board() {
   echo "  sudo journalctl -u rc-car-board -n 120 --no-pager"
 }
 
+load_config
+export_install_defaults
 run_git_pull
 
 case "$MODE" in
