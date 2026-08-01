@@ -3,6 +3,7 @@ import threading
 import time
 import re
 import json
+import ipaddress
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
@@ -310,6 +311,24 @@ def create_app(test_config=None):
         return f'{prefix}/{safe_board}'
 
     def build_stream_urls(raw_board_name):
+        def is_loopback_or_unspecified_host(base_url):
+            try:
+                parsed = urllib_parse.urlparse(base_url)
+            except Exception:
+                return False
+
+            host = (parsed.hostname or '').strip().lower()
+            if not host:
+                return False
+            if host in {'localhost', '0.0.0.0'}:
+                return True
+
+            try:
+                ip = ipaddress.ip_address(host)
+                return ip.is_loopback or ip.is_unspecified
+            except ValueError:
+                return False
+
         path = build_stream_path(raw_board_name)
         encoded_path = '/'.join(urllib_parse.quote(segment, safe='') for segment in path.split('/'))
         rtsp_base = app.config['MEDIAMTX_RTSP_BASE']
@@ -323,6 +342,14 @@ def create_app(test_config=None):
                     rtsp_base = f'rtsp://{host_only}:8554'
                 if not whep_base:
                     whep_base = request.url_root.rstrip('/')
+
+        host_header = (request.host or '').strip()
+        host_only = host_header.split(':', 1)[0] if host_header else ''
+        if host_only:
+            if rtsp_base and is_loopback_or_unspecified_host(rtsp_base):
+                rtsp_base = f'rtsp://{host_only}:8554'
+            if whep_base and is_loopback_or_unspecified_host(whep_base):
+                whep_base = request.url_root.rstrip('/')
 
         rtsp_url = f'{rtsp_base}/{encoded_path}' if rtsp_base else None
         whep_url = f'{whep_base}/{encoded_path}/whep' if whep_base else None
