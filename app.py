@@ -409,18 +409,14 @@ def create_app(test_config=None):
         encoded_path = '/'.join(urllib_parse.quote(segment, safe='') for segment in path.split('/'))
         rtsp_base = app.config['MEDIAMTX_RTSP_BASE']
         whep_base = app.config['MEDIAMTX_WHEP_BASE']
-
-        if not rtsp_base or not whep_base:
-            host_header = (request.host or '').strip()
-            host_only = host_header.split(':', 1)[0] if host_header else ''
-            if host_only:
-                if not rtsp_base:
-                    rtsp_base = f'rtsp://{host_only}:8554'
-                if not whep_base:
-                    whep_base = request.url_root.rstrip('/')
-
         host_header = (request.host or '').strip()
         host_only = host_header.split(':', 1)[0] if host_header else ''
+
+        if not rtsp_base and host_only:
+            rtsp_base = f'rtsp://{host_only}:8554'
+        if not whep_base and host_only:
+            whep_base = request.url_root.rstrip('/')
+
         if host_only:
             if rtsp_base and is_loopback_or_unspecified_host(rtsp_base):
                 rtsp_base = f'rtsp://{host_only}:8554'
@@ -640,6 +636,16 @@ def create_app(test_config=None):
     def resolve_board_name():
         board_name = (request.args.get('board_name') or request.headers.get('X-Board-Name') or '').strip()
         return board_name or None
+
+    def resolve_ingest_board_name():
+        board_name = normalize_board_name(resolve_board_name())
+        if board_name:
+            return board_name
+        if 'user_id' in session:
+            active_session = get_active_session(session['user_id'])
+            if active_session:
+                return active_session['name']
+        return None
 
     def board_request_is_authorized():
         authorization = (request.headers.get('Authorization') or '').strip()
@@ -1259,15 +1265,9 @@ def create_app(test_config=None):
             return jsonify({'status': 'ok', 'action': None, 'board_name': board_name})
         return jsonify({'status': 'ok', 'action': action, 'board_name': board_name})
 
-    @app.route('/api/board/stream/status')
-    def board_stream_status():
-        if not board_request_is_authorized():
-            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
-
-        board_name = normalize_board_name(resolve_board_name())
-
-        db = get_db()
-        sync_device_statuses(db)
+    def resolve_board_stream_state(board_name, db=None):
+        if db is None:
+            db = get_db()
         if board_name:
             active_row = db.execute(
                 """
@@ -1288,6 +1288,18 @@ def create_app(test_config=None):
             active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
             stream_urls = {'path': None, 'whep_url': None, 'rtsp_url': None}
             enabled = bool(active_row is not None)
+        return enabled, stream_urls
+
+    @app.route('/api/board/stream/status')
+    def board_stream_status():
+        if not board_request_is_authorized():
+            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
+
+        board_name = normalize_board_name(resolve_board_name())
+
+        db = get_db()
+        sync_device_statuses(db)
+        enabled, stream_urls = resolve_board_stream_state(board_name, db)
 
         mark_board_activity_for_device('stream_status_poll', board_name)
         return jsonify({
@@ -1310,21 +1322,7 @@ def create_app(test_config=None):
             return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
 
         db = get_db()
-        active_row = db.execute(
-            """
-            SELECT s.id
-            FROM sessions s
-            JOIN devices d ON d.id = s.device_id
-            WHERE s.status = 'active' AND d.name = ?
-            ORDER BY s.id DESC
-            LIMIT 1
-            """,
-            (board_name,),
-        ).fetchone()
-        device_row = db.execute('SELECT id, status, last_seen_at FROM devices WHERE name = ?', (board_name,)).fetchone()
-        device_online = bool(device_row and is_device_online(dict(device_row), datetime.now(timezone.utc)))
-        enabled = bool(active_row is not None or (device_row is not None and device_online))
-        stream_urls = build_stream_urls(board_name)
+        enabled, stream_urls = resolve_board_stream_state(board_name, db)
 
         mark_board_activity_for_device('stream_config_poll', board_name)
         return jsonify({
@@ -1351,11 +1349,7 @@ def create_app(test_config=None):
 
     @app.route('/api/stream/chunk', methods=['POST'])
     def api_stream_chunk():
-        board_name = normalize_board_name(resolve_board_name())
-        if not board_name and 'user_id' in session:
-            active_session = get_active_session(session['user_id'])
-            if active_session:
-                board_name = active_session['name']
+        board_name = resolve_ingest_board_name()
         data = request.get_data()
         if not data:
             return jsonify({'status': 'error', 'message': 'chunk data is required'}), 400
@@ -1369,11 +1363,7 @@ def create_app(test_config=None):
     @app.route('/api/video/pipeline/frame', methods=['POST'])
     def api_video_pipeline_frame():
         nonlocal pipeline_frame_counter
-        board_name = normalize_board_name(resolve_board_name())
-        if not board_name and 'user_id' in session:
-            active_session = get_active_session(session['user_id'])
-            if active_session:
-                board_name = active_session['name']
+        board_name = resolve_ingest_board_name()
         data = request.get_data()
         if not data:
             return jsonify({'status': 'error', 'message': 'frame data is required'}), 400
@@ -1402,14 +1392,7 @@ def create_app(test_config=None):
         }), 410
 
     def resolve_feed_board_name():
-        candidate = normalize_board_name(request.args.get('board_name'))
-        if candidate:
-            return candidate
-        if 'user_id' in session:
-            active_session = get_active_session(session['user_id'])
-            if active_session:
-                return active_session['name']
-        return None
+        return resolve_ingest_board_name()
 
     @app.route('/video_feed')
     def video_feed():
