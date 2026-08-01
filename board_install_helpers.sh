@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+read_board_token_from_file() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 1
+  awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$env_file" 2>/dev/null
+}
+
 derive_board_token() {
   local repo_dir="${1:-$SCRIPT_DIR}"
   local token_source=""
@@ -9,7 +15,7 @@ derive_board_token() {
   if [[ -n "$repo_dir" ]]; then
     candidate="$repo_dir/.env"
     if [[ -f "$candidate" ]]; then
-      token_source="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$candidate" 2>/dev/null || true)"
+      token_source="$(read_board_token_from_file "$candidate" 2>/dev/null || true)"
       if [[ -n "$token_source" ]]; then
         printf '%s' "$token_source"
         return 0
@@ -23,7 +29,7 @@ derive_board_token() {
   fi
 
   if [[ -n "${SERVER_ENV_FILE:-}" && -f "$SERVER_ENV_FILE" ]]; then
-    token_source="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$SERVER_ENV_FILE" 2>/dev/null || true)"
+    token_source="$(read_board_token_from_file "$SERVER_ENV_FILE" 2>/dev/null || true)"
     if [[ -n "$token_source" ]]; then
       printf '%s' "$token_source"
       return 0
@@ -55,7 +61,7 @@ select_board_token() {
 
   for candidate in "${candidates[@]}"; do
     [[ -n "$candidate" ]] || continue
-    if token_value="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
+    if token_value="$(read_board_token_from_file "$candidate" 2>/dev/null)" && [[ -n "$token_value" ]]; then
       if [[ -n "${BOARD_TOKEN:-}" && "$BOARD_TOKEN" != "dev-board-token" ]]; then
         return 0
       fi

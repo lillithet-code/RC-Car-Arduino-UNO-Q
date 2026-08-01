@@ -118,12 +118,6 @@ if ! id "$BOARD_RUN_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ -n "$BOARD_TOKEN" && "$BOARD_TOKEN" != "dev-board-token" ]]; then
-  :
-elif [[ -f "$BOARD_DIR/.env" ]]; then
-  BOARD_TOKEN="$(awk -F'=' '/^BOARD_TOKEN=/{print substr($0, index($0,$2)); exit}' "$BOARD_DIR/.env" 2>/dev/null || true)"
-fi
-
 if [[ -z "$BOARD_TOKEN" || "$BOARD_TOKEN" == "dev-board-token" ]]; then
   if ! discover_board_token; then
     echo "Error: BOARD_TOKEN must be set to the same non-default token used by the server." >&2

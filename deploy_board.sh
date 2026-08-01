@@ -33,7 +33,6 @@ discover_board_token() {
   local candidates=(
     "$SCRIPT_DIR/.env"
     "$HOME/.env"
-    "$HOME/rc-car-arduino-uno-q/.env"
     "$BOARD_DIR/.env"
   )
 

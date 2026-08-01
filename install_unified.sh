@@ -46,9 +46,8 @@ discover_board_token() {
   local candidates=(
     "${SERVER_APP_DIR:-}/.env"
     "${BOARD_DIR:-}/.env"
-    "/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q/.env"
-    "$HOME/rc-car-arduino-uno-q/.env"
-    "/home/user/rc-car-arduino-uno-q/.env"
+    "$SCRIPT_DIR/.env"
+    "$HOME/.env"
   )
 
   for candidate in "${candidates[@]}"; do
