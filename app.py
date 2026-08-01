@@ -314,6 +314,16 @@ def create_app(test_config=None):
         encoded_path = '/'.join(urllib_parse.quote(segment, safe='') for segment in path.split('/'))
         rtsp_base = app.config['MEDIAMTX_RTSP_BASE']
         whep_base = app.config['MEDIAMTX_WHEP_BASE']
+
+        if not rtsp_base or not whep_base:
+            host_header = (request.host or '').strip()
+            host_only = host_header.split(':', 1)[0] if host_header else ''
+            if host_only:
+                if not rtsp_base:
+                    rtsp_base = f'rtsp://{host_only}:8554'
+                if not whep_base:
+                    whep_base = request.url_root.rstrip('/')
+
         rtsp_url = f'{rtsp_base}/{encoded_path}' if rtsp_base else None
         whep_url = f'{whep_base}/{encoded_path}/whep' if whep_base else None
         return {

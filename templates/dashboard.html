@@ -22,6 +22,13 @@
     .video-panel { flex: 1 1 0; min-width: 320px; }
     .joystick-panel { width: 260px; display: flex; flex-direction: column; align-items: center; }
     .stream { width: 100%; max-width: 720px; border-radius: 20px; border: 2px solid #334155; }
+    .stream-diagnostics { max-width: 720px; margin-top: 0.75rem; padding: 0.85rem 1rem; border-radius: 14px; border: 1px solid rgba(251,191,36,0.45); background: rgba(120,53,15,0.2); color: #fde68a; }
+    .stream-diagnostics.ok { border-color: rgba(34,197,94,0.45); background: rgba(20,83,45,0.24); color: #86efac; }
+    .stream-diagnostics.error { border-color: rgba(248,113,113,0.55); background: rgba(127,29,29,0.24); color: #fecaca; }
+    .stream-diagnostics p { margin: 0 0 0.45rem; }
+    .stream-diagnostics p:last-child { margin-bottom: 0; }
+    .stream-diagnostics .label { font-weight: 700; color: #f8fafc; margin-right: 0.35rem; }
+    .stream-diagnostics code { color: #e2e8f0; }
     .joystick { width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle at center, #1e3a8a 0%, #0f172a 70%); position: relative; border: 3px solid #60a5fa; touch-action: none; }
     .knob { width: 70px; height: 70px; border-radius: 50%; background: linear-gradient(135deg, #fbbf24, #f59e0b); position: absolute; top: 75px; left: 75px; cursor: pointer; }
   </style>
@@ -59,7 +66,7 @@
         <div class="session-layout">
           <div class="video-panel">
             <video id="stream-video" class="stream" autoplay playsinline muted style="display:none;"></video>
-            <img id="stream-image" class="stream" alt="Live video stream fallback" style="display:none;">
+            <div id="stream-diagnostics" class="stream-diagnostics" style="display:none;"></div>
           </div>
           <div class="joystick-panel">
             <div class="joystick" id="joystick">
@@ -76,9 +83,8 @@
     const joystick = document.getElementById('joystick');
     const knob = document.getElementById('knob');
     const streamVideo = document.getElementById('stream-video');
-    const streamImage = document.getElementById('stream-image');
+    const streamDiagnostics = document.getElementById('stream-diagnostics');
     const remainingTime = document.getElementById('remaining-time');
-    const streamMjpegBaseUrl = '{{ url_for('video_feed') }}';
     const streamRefreshIntervalMs = 500;
     const commandHeartbeatIntervalMs = 120;
     let dragging = false;
@@ -90,22 +96,75 @@
     let activeStreamId = null;
     let billingStarted = false;
     let startRequestInFlight = false;
-    let fallbackFrameRendered = false;
     let visibilityRequestInFlight = false;
     let currentDriveAction = 'stop';
+    let streamConnectionError = null;
+    let streamWhepUrl = null;
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function setStreamDiagnosticsLevel(level) {
+      if (!streamDiagnostics) {
+        return;
+      }
+      streamDiagnostics.classList.remove('ok', 'error');
+      if (level === 'ok') {
+        streamDiagnostics.classList.add('ok');
+      } else if (level === 'error') {
+        streamDiagnostics.classList.add('error');
+      }
+    }
+
+    function renderStreamDiagnostics() {
+      if (!streamDiagnostics) {
+        return;
+      }
+
+      if (!hasActiveSession) {
+        streamDiagnostics.style.display = 'none';
+        streamDiagnostics.innerHTML = '';
+        return;
+      }
+
+      const statusText = streamReady ? 'ready' : (streamLive ? 'live, waiting for ready threshold' : 'offline');
+      const transportText = usingWebRTC ? 'WebRTC active' : 'WebRTC not connected';
+      const whepText = streamWhepUrl || 'not available';
+      let message = 'Waiting for stream initialization.';
+      let level = 'warning';
+
+      if (usingWebRTC) {
+        message = 'Live stream connected over WebRTC.';
+        level = 'ok';
+      } else if (streamConnectionError) {
+        message = streamConnectionError;
+        level = 'error';
+      } else if (!streamReady) {
+        message = 'Board stream is not ready yet. Verify the board publisher and MediaMTX path.';
+      }
+
+      setStreamDiagnosticsLevel(level);
+      streamDiagnostics.innerHTML = [
+        `<p>${escapeHtml(message)}</p>`,
+        `<p><span class="label">Session stream status:</span>${escapeHtml(statusText)}</p>`,
+        `<p><span class="label">Playback transport:</span>${escapeHtml(transportText)}</p>`,
+        `<p><span class="label">WHEP endpoint:</span><code>${escapeHtml(whepText)}</code></p>`,
+      ].join('');
+      streamDiagnostics.style.display = 'block';
+    }
 
     function hideStreamSurfaces() {
       if (streamVideo) {
         streamVideo.style.display = 'none';
         streamVideo.srcObject = null;
       }
-      if (streamImage) {
-        streamImage.style.display = 'none';
-        if (streamImage.src) {
-          streamImage.removeAttribute('src');
-        }
-      }
-      fallbackFrameRendered = false;
+      renderStreamDiagnostics();
     }
 
     async function closePeerConnection() {
@@ -130,6 +189,7 @@
       peerConnection = null;
       usingWebRTC = false;
       activeStreamId = null;
+      renderStreamDiagnostics();
     }
 
     function formatSeconds(totalSeconds) {
@@ -163,7 +223,7 @@
       if (usingWebRTC) {
         return Boolean(streamVideo && streamVideo.style.display !== 'none');
       }
-      return Boolean(streamImage && streamImage.style.display !== 'none');
+      return false;
     }
 
     function isStreamActuallyVisible() {
@@ -174,8 +234,7 @@
       if (usingWebRTC) {
         return Boolean(streamVideo && streamVideo.readyState >= 2 && !streamVideo.paused && streamVideo.videoWidth > 0);
       }
-
-      return Boolean(streamImage && fallbackFrameRendered && (streamImage.naturalWidth || 0) > 0);
+      return false;
     }
 
     async function postStreamVisibility() {
@@ -211,10 +270,7 @@
           return;
         }
       } else {
-        const fallbackVisible = streamImage && streamImage.style.display !== 'none';
-        if (!fallbackVisible || !fallbackFrameRendered || (streamImage.naturalWidth || 0) <= 0) {
-          return;
-        }
+        return;
       }
 
       startRequestInFlight = true;
@@ -238,24 +294,14 @@
       }
     }
 
-    function enableMjpegFallback() {
+    function showWebRtcFailure(message) {
       usingWebRTC = false;
       if (streamVideo) {
         streamVideo.style.display = 'none';
         streamVideo.srcObject = null;
       }
-
-      if (!hasActiveSession || !streamReady) {
-        hideStreamSurfaces();
-        return;
-      }
-
-      if (streamImage) {
-        streamImage.style.display = 'block';
-        if (streamImage.src !== streamMjpegBaseUrl) {
-          streamImage.src = streamMjpegBaseUrl;
-        }
-      }
+      streamConnectionError = message || 'WebRTC connection failed.';
+      renderStreamDiagnostics();
     }
 
     async function fetchSessionStreamConfig() {
@@ -267,6 +313,7 @@
       if (payload.status !== 'ok' || !payload.whep_url) {
         throw new Error(payload.message || 'whep_url unavailable');
       }
+      streamWhepUrl = payload.whep_url;
       return payload;
     }
 
@@ -287,12 +334,14 @@
 
     async function setupWebRTC() {
       if (!window.RTCPeerConnection || !streamVideo) {
-        enableMjpegFallback();
+        showWebRtcFailure('This browser does not support WebRTC playback.');
         return;
       }
 
       try {
         await closePeerConnection();
+        streamConnectionError = null;
+        renderStreamDiagnostics();
 
         const streamConfig = await fetchSessionStreamConfig();
         peerConnection = new RTCPeerConnection({
@@ -311,14 +360,14 @@
             streamVideo.srcObject = incomingStream;
           }
           streamVideo.style.display = 'block';
-          if (streamImage) {
-            streamImage.style.display = 'none';
-          }
           usingWebRTC = true;
+          streamConnectionError = null;
+          renderStreamDiagnostics();
 
           const startPlayback = async () => {
             try {
               await streamVideo.play();
+              renderStreamDiagnostics();
             } catch (error) {
               if (error && error.name === 'AbortError') {
                 setTimeout(() => {
@@ -336,7 +385,8 @@
 
         peerConnection.onconnectionstatechange = () => {
           if (['failed', 'closed', 'disconnected'].includes(peerConnection.connectionState)) {
-            enableMjpegFallback();
+            const state = peerConnection.connectionState;
+            showWebRtcFailure(`WebRTC connection state changed to ${state}.`);
           }
         };
 
@@ -358,9 +408,9 @@
         const answerSdp = await response.text();
         await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
       } catch (error) {
-        console.warn('WebRTC setup failed, using MJPEG fallback:', error);
+        console.warn('WebRTC setup failed:', error);
         await closePeerConnection();
-        enableMjpegFallback();
+        showWebRtcFailure(`WebRTC setup failed: ${error && error.message ? error.message : 'unknown error'}`);
       }
     }
 
@@ -383,6 +433,7 @@
 
         if (!hasActiveSession || !streamReady) {
           await closePeerConnection();
+          streamConnectionError = null;
           hideStreamSurfaces();
         } else if (usingWebRTC) {
           if (streamVideo) {
@@ -391,19 +442,12 @@
               streamVideo.play().catch(() => {});
             }
           }
-          if (streamImage) {
-            streamImage.style.display = 'none';
-          }
-        } else if (!usingWebRTC && streamImage && !streamImage.src) {
-          streamImage.style.display = 'block';
-          streamImage.src = streamMjpegBaseUrl;
         }
+
+        renderStreamDiagnostics();
 
         if (hasActiveSession && streamReady && !usingWebRTC) {
           await setupWebRTC();
-          if (!usingWebRTC) {
-            maybeStartSessionBilling();
-          }
         }
 
         if (!hasActiveSession && joystick) {
@@ -414,13 +458,8 @@
       }
     }
 
-    if (streamImage || remainingTime) {
+    if (streamVideo || remainingTime) {
       hideStreamSurfaces();
-      if (streamImage) {
-        streamImage.addEventListener('load', () => {
-          fallbackFrameRendered = true;
-        });
-      }
       setupWebRTC();
       pollSessionStatus();
       setInterval(pollSessionStatus, 1000);

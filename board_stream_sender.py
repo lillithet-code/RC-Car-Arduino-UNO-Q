@@ -31,7 +31,24 @@ H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
-H264_INPUT_FORMAT = os.environ.get('H264_INPUT_FORMAT', 'mjpeg').strip().lower()
+
+
+def resolve_input_format():
+    direct = (os.environ.get('H264_INPUT_FORMAT') or '').strip().lower()
+    if direct:
+        return direct
+
+    # Backward compatibility with installer/env files that still use the plural key.
+    legacy = (os.environ.get('H264_INPUT_FORMATS') or '').strip().lower()
+    if legacy:
+        first = legacy.split(',')[0].strip()
+        if first:
+            return first
+
+    return 'mjpeg'
+
+
+H264_INPUT_FORMAT = resolve_input_format()
 PUBLISH_RTSP_URL = os.environ.get('MEDIAMTX_RTSP_URL', '').strip()
 
 STREAM_CONFIG_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/config'
