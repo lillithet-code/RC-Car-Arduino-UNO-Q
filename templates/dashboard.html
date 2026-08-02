@@ -164,7 +164,9 @@
                 <div class="knob" id="fullscreen-knob"></div>
               </div>
             </div>
+            {% if user.is_admin %}
             <div id="stream-diagnostics" class="stream-diagnostics" style="display:none;"></div>
+            {% endif %}
           </div>
           <div class="joystick-panel">
             <div class="joystick" id="joystick">
