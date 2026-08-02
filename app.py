@@ -1238,10 +1238,6 @@ def create_app(test_config=None):
                 available_encoders = []
             available_encoders = [str(value).strip() for value in available_encoders if str(value).strip()]
 
-            for encoder in ('libx264', 'h264_v4l2m2m'):
-                if encoder not in available_encoders:
-                    available_encoders.append(encoder)
-
             try:
                 available_modes = json.loads(item.get('available_video_modes_json') or '[]')
             except Exception:

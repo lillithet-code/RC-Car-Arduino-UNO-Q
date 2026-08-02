@@ -95,6 +95,9 @@
                 <label>
                   Encoder
                   <select name="h264_encoder">
+                    {% if not device.available_h264_encoders %}
+                    <option value="" selected disabled>No board encoder report yet</option>
+                    {% endif %}
                     {% for encoder in device.available_h264_encoders %}
                     <option value="{{ encoder }}" {% if encoder == device.preferred_h264_encoder %}selected{% endif %}>{{ encoder }}</option>
                     {% endfor %}
