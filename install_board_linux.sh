@@ -87,18 +87,18 @@ ROUTER_SOCKET_PATH="$(resolve_config_value ROUTER_SOCKET_PATH /var/run/arduino-r
 COMMAND_WS_URL="$(resolve_config_value COMMAND_WS_URL '')"
 COMMAND_WS_RETRY_SECONDS="$(resolve_config_value COMMAND_WS_RETRY_SECONDS 1.0)"
 FRAME_RATE="$(resolve_video_config_value FRAME_RATE 30)"
-VIDEO_WIDTH="$(resolve_video_config_value VIDEO_WIDTH 1920)"
-VIDEO_HEIGHT="$(resolve_video_config_value VIDEO_HEIGHT 1080)"
+VIDEO_WIDTH="$(resolve_video_config_value VIDEO_WIDTH 1024)"
+VIDEO_HEIGHT="$(resolve_video_config_value VIDEO_HEIGHT 576)"
 VIDEO_MODE_AUTO="$(resolve_config_value VIDEO_MODE_AUTO 1)"
 VIDEO_DEVICE_AUTO_RECOVER="$(resolve_config_value VIDEO_DEVICE_AUTO_RECOVER 1)"
 STREAM_STATUS_POLL_SECONDS="$(resolve_config_value STREAM_STATUS_POLL_SECONDS 1.0)"
 STREAM_DISABLE_GRACE_SECONDS="$(resolve_config_value STREAM_DISABLE_GRACE_SECONDS 8.0)"
-H264_ENCODER="$(resolve_config_value H264_ENCODER '')"
+H264_ENCODER="$(resolve_config_value H264_ENCODER h264_v4l2m2m)"
 H264_PROFILE="$(resolve_config_value H264_PROFILE baseline)"
 H264_BITRATE="$(resolve_config_value H264_BITRATE 2500k)"
 H264_MAXRATE="$(resolve_config_value H264_MAXRATE 2500k)"
 H264_BUFSIZE="$(resolve_config_value H264_BUFSIZE 1500k)"
-H264_GOP="$(resolve_config_value H264_GOP 30)"
+H264_GOP="$(resolve_config_value H264_GOP "$FRAME_RATE")"
 H264_INPUT_FORMAT="$(resolve_config_value H264_INPUT_FORMAT '')"
 H264_INPUT_FORMATS="$(resolve_config_value H264_INPUT_FORMATS mjpeg)"
 VIDEO_REPROBE_DELAY_SECONDS="$(resolve_config_value VIDEO_REPROBE_DELAY_SECONDS 1.0)"
@@ -331,7 +331,15 @@ shutdown_children() {
   kill "$STREAM_PID" "$COMMAND_PID" 2>/dev/null || true
   wait "$STREAM_PID" "$COMMAND_PID" 2>/dev/null || true
 }
-trap shutdown_children EXIT INT TERM
+
+handle_termination() {
+  shutdown_children
+  trap - EXIT
+  exit 0
+}
+
+trap shutdown_children EXIT
+trap handle_termination INT TERM
 
 set +e
 wait -n "$STREAM_PID" "$COMMAND_PID"

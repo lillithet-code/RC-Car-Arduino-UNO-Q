@@ -23,24 +23,14 @@ VIDEO_DEVICE_SETTING = os.environ.get('VIDEO_DEVICE', 'auto').strip().lower()
 VIDEO_DEVICE_AUTO_RECOVER = os.environ.get('VIDEO_DEVICE_AUTO_RECOVER', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 VIDEO_MODE_AUTO = os.environ.get('VIDEO_MODE_AUTO', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '30'))
-VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1920'))
-VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '1080'))
+VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1024'))
+VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '576'))
 STREAM_STATUS_POLL_SECONDS = max(0.3, float(os.environ.get('STREAM_STATUS_POLL_SECONDS', '1.0')))
 STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
 VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY_SECONDS', '1.0')))
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
-H264_ENCODER = os.environ.get('H264_ENCODER', '').strip()
+H264_ENCODER = os.environ.get('H264_ENCODER', 'h264_v4l2m2m').strip() or 'h264_v4l2m2m'
 H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
-H264_HW_ENCODERS = (
-    'h264_v4l2m2m',
-    'h264_omx',
-    'h264_vaapi',
-    'h264_nvenc',
-    'h264_qsv',
-    'h264_videotoolbox',
-    'h264_rkmpp',
-)
-H264_FALLBACK_ENCODER = 'libx264'
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
 H264_GOP = int(os.environ.get('H264_GOP', str(max(1, int(FRAME_RATE)))))
@@ -179,24 +169,8 @@ def detect_available_ffmpeg_encoders():
     return encoders
 
 
-def resolve_h264_encoder(available_encoders=None):
-    explicit_encoder = (H264_ENCODER or '').strip()
-    candidates = [encoder for encoder in (available_encoders or detect_available_ffmpeg_encoders()) if (encoder or '').strip()]
-
-    if explicit_encoder:
-        if explicit_encoder in candidates:
-            return explicit_encoder
-        return explicit_encoder
-
-    for encoder in H264_HW_ENCODERS:
-        if encoder in candidates:
-            return encoder
-
-    for candidate in candidates:
-        if candidate == H264_FALLBACK_ENCODER:
-            return candidate
-
-    return H264_FALLBACK_ENCODER
+def resolve_h264_encoder():
+    return H264_ENCODER
 
 
 def resolve_requested_camera_mode(env=None):
@@ -207,16 +181,9 @@ def resolve_requested_camera_mode(env=None):
     requested_fps = float(source.get('FRAME_RATE', str(FRAME_RATE)))
     requested_format = normalize_input_format(source.get('H264_INPUT_FORMAT') or H264_INPUT_FORMAT)
 
-    legacy_low_resolution = (
-        (requested_width, requested_height) in {(800, 600), (640, 480)}
-        or requested_width < 1280
-        or requested_height < 720
-    )
     legacy_low_fps = requested_fps <= 2.0
 
-    if legacy_low_resolution or legacy_low_fps:
-        requested_width = 1920
-        requested_height = 1080
+    if legacy_low_fps:
         requested_fps = max(requested_fps, 30.0)
 
     return CameraMode(

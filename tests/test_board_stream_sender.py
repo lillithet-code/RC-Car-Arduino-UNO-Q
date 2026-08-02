@@ -45,23 +45,8 @@ ioctl: VIDIOC_ENUM_FMT
     assert sender.CameraMode('mjpeg', 1920, 1080, 15.0) in modes
 
 
-def test_resolve_h264_encoder_prefers_hw_encoder_when_available():
-    selected = sender.resolve_h264_encoder(['h264_v4l2m2m', 'libx264'])
-    assert selected == 'h264_v4l2m2m'
-
-
-def test_resolve_h264_encoder_prefers_common_hw_encoder_when_available():
-    selected = sender.resolve_h264_encoder(['h264_vaapi', 'libx264'])
-    assert selected == 'h264_vaapi'
-
-
-def test_resolve_h264_encoder_uses_project_priority_over_ffmpeg_listing_order():
-    selected = sender.resolve_h264_encoder([
-        'h264_nvenc',
-        'h264_v4l2m2m',
-        'h264_vaapi',
-        'libx264',
-    ])
+def test_resolve_h264_encoder_uses_v4l2_m2m_by_default():
+    selected = sender.resolve_h264_encoder()
     assert selected == 'h264_v4l2m2m'
 
 
@@ -96,15 +81,15 @@ ioctl: VIDIOC_ENUM_FMT
     assert selected.fps == 30.0
 
 
-def test_requested_legacy_resolution_is_upgraded_to_1080p30():
+def test_requested_low_resolution_is_preserved():
     requested = sender.resolve_requested_camera_mode({
-        'VIDEO_WIDTH': '800',
-        'VIDEO_HEIGHT': '600',
+        'VIDEO_WIDTH': '640',
+        'VIDEO_HEIGHT': '480',
         'FRAME_RATE': '30',
         'H264_INPUT_FORMAT': 'mjpeg',
     })
-    assert requested.width == 1920
-    assert requested.height == 1080
+    assert requested.width == 640
+    assert requested.height == 480
     assert requested.fps == 30.0
 
 
