@@ -31,7 +31,15 @@ VIDEO_REPROBE_DELAY_SECONDS = max(0.2, float(os.environ.get('VIDEO_REPROBE_DELAY
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip()
 H264_ENCODER = os.environ.get('H264_ENCODER', '').strip()
 H264_BITRATE = os.environ.get('H264_BITRATE', '2500k').strip()
-H264_HW_ENCODERS = ('h264_v4l2m2m', 'h264_omx')
+H264_HW_ENCODERS = (
+    'h264_v4l2m2m',
+    'h264_omx',
+    'h264_vaapi',
+    'h264_nvenc',
+    'h264_qsv',
+    'h264_videotoolbox',
+    'h264_rkmpp',
+)
 H264_FALLBACK_ENCODER = 'libx264'
 H264_MAXRATE = os.environ.get('H264_MAXRATE', H264_BITRATE).strip()
 H264_BUFSIZE = os.environ.get('H264_BUFSIZE', '1500k').strip()
@@ -165,7 +173,7 @@ def detect_available_ffmpeg_encoders():
 
     encoders = []
     for line in (result.stdout or '').splitlines():
-        match = re.search(r'^\s*[A-Z]\s+(\S+)\s+', line)
+        match = re.search(r'^\s*[A-Z.]{6}\s+(\S+)\s+', line)
         if match:
             encoders.append(match.group(1))
     return encoders
@@ -180,9 +188,9 @@ def resolve_h264_encoder(available_encoders=None):
             return explicit_encoder
         return explicit_encoder
 
-    for candidate in candidates:
-        if candidate in H264_HW_ENCODERS:
-            return candidate
+    for encoder in H264_HW_ENCODERS:
+        if encoder in candidates:
+            return encoder
 
     for candidate in candidates:
         if candidate == H264_FALLBACK_ENCODER:

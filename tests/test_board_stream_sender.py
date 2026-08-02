@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import board_stream_sender as sender
 
 
@@ -48,6 +50,36 @@ def test_resolve_h264_encoder_prefers_hw_encoder_when_available():
     assert selected == 'h264_v4l2m2m'
 
 
+def test_resolve_h264_encoder_prefers_common_hw_encoder_when_available():
+    selected = sender.resolve_h264_encoder(['h264_vaapi', 'libx264'])
+    assert selected == 'h264_vaapi'
+
+
+def test_resolve_h264_encoder_uses_project_priority_over_ffmpeg_listing_order():
+    selected = sender.resolve_h264_encoder([
+        'h264_nvenc',
+        'h264_v4l2m2m',
+        'h264_vaapi',
+        'libx264',
+    ])
+    assert selected == 'h264_v4l2m2m'
+
+
+def test_detect_available_ffmpeg_encoders_parses_ffmpeg_flag_column(monkeypatch):
+    output = """
+Encoders:
+ V....D h264_v4l2m2m V4L2 mem2mem H.264 encoder wrapper
+ V....D libx264         libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10
+"""
+    monkeypatch.setattr(
+        sender.subprocess,
+        'run',
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=output),
+    )
+
+    assert sender.detect_available_ffmpeg_encoders() == ['h264_v4l2m2m', 'libx264']
+
+
 def test_camera_mode_selection_handles_stepwise_v4l2_ranges():
     sample = """
 ioctl: VIDIOC_ENUM_FMT
@@ -88,9 +120,14 @@ def test_requested_low_fps_is_upgraded_to_30fps():
     assert requested.fps == 30.0
 
 
-def test_ffmpeg_command_forces_browser_compatible_h264():
+def test_ffmpeg_command_forces_browser_compatible_h264(monkeypatch):
+    monkeypatch.setattr(sender, 'resolve_h264_encoder', lambda: 'libx264')
     mode = sender.CameraMode('mjpeg', 1920, 1080, 30.0)
-    command = sender.build_publish_command(0, 'rtsp://example.test:8554/cars/RCCar1', mode)
+    command = sender.build_publish_command(
+        0,
+        'rtsp://example.test:8554/cars/RCCar1',
+        mode,
+    )
     assert command[command.index('-pix_fmt') + 1] == 'yuv420p'
     assert command[command.index('-profile:v') + 1] == 'baseline'
     assert command[command.index('-bf') + 1] == '0'
