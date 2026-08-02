@@ -63,6 +63,7 @@ H264_INPUT_FORMAT = resolve_input_format()
 PUBLISH_RTSP_URL = os.environ.get('MEDIAMTX_RTSP_URL', '').strip()
 
 STREAM_CONFIG_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/config'
+STREAM_REPORT_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/report'
 DEVICE_REGISTER_ENDPOINT = f'{SERVER_BASE_URL}/api/devices/register'
 
 
@@ -86,6 +87,42 @@ def normalize_input_format(value):
         'h264': 'h264',
     }
     return aliases.get(normalized, normalized)
+
+
+def parse_mode_value(mode_value):
+    raw = (mode_value or '').strip()
+    if not raw:
+        return None
+    parts = [part.strip() for part in raw.split(',')]
+    if len(parts) != 4:
+        return None
+    input_format = normalize_input_format(parts[0])
+    try:
+        width = int(parts[1])
+        height = int(parts[2])
+        fps = float(parts[3])
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0 or fps <= 0:
+        return None
+    return CameraMode(input_format=input_format, width=width, height=height, fps=fps)
+
+
+def format_mode_value(camera_mode):
+    if camera_mode is None:
+        return None
+    return f'{camera_mode.input_format},{camera_mode.width},{camera_mode.height},{camera_mode.fps:g}'
+
+
+def mode_to_dict(camera_mode):
+    if camera_mode is None:
+        return None
+    return {
+        'input_format': camera_mode.input_format,
+        'width': camera_mode.width,
+        'height': camera_mode.height,
+        'fps': camera_mode.fps,
+    }
 
 
 def parse_v4l2_modes(output):
@@ -467,6 +504,48 @@ def fetch_stream_config():
         return None
 
 
+def report_stream_state(active_video_device, current_encoder, current_mode, available_modes, available_encoders):
+    payload = {
+        'board_name': BOARD_NAME,
+        'current_h264_encoder': current_encoder,
+        'current_video_mode': mode_to_dict(current_mode),
+        'available_h264_encoders': list(available_encoders or []),
+        'available_video_modes': [mode_to_dict(mode) for mode in (available_modes or [])],
+        'video_device': active_video_device,
+    }
+    req = urllib_request.Request(
+        STREAM_REPORT_ENDPOINT,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            **board_request_headers('RC-Car-Board-Stream/2.0'),
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=3):
+            return True
+    except Exception as exc:
+        print(f'stream state report failed: {exc}', file=sys.stderr)
+        return False
+
+
+def resolve_profile_from_config(config_payload):
+    requested_mode = resolve_requested_camera_mode()
+    requested_encoder = H264_ENCODER
+
+    profile = (config_payload or {}).get('video_profile')
+    if isinstance(profile, dict):
+        encoder_override = (profile.get('h264_encoder') or '').strip()
+        if encoder_override:
+            requested_encoder = encoder_override
+        mode_override = parse_mode_value(profile.get('video_mode') or '')
+        if mode_override is not None:
+            requested_mode = mode_override
+
+    return requested_encoder, requested_mode
+
+
 def stop_publisher(process, reason):
     if process is None:
         return
@@ -485,13 +564,13 @@ def stop_publisher(process, reason):
         print(f'publisher stop error ({reason}): {exc}', file=sys.stderr)
 
 
-def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
+def build_publish_command(video_device_index, rtsp_url, camera_mode=None, encoder_override=None):
     if camera_mode is None:
         camera_mode = resolve_requested_camera_mode()
 
-    chosen_encoder = resolve_h264_encoder()
+    chosen_encoder = (encoder_override or '').strip() or resolve_h264_encoder()
     print(
-        f'ffmpeg encoder selection: requested={H264_ENCODER or "<auto>"} resolved={chosen_encoder}',
+        f'ffmpeg encoder selection: requested={chosen_encoder} resolved={chosen_encoder}',
         file=sys.stderr,
     )
     command = [
@@ -533,8 +612,8 @@ def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
     return command
 
 
-def start_publisher(video_device_index, rtsp_url, camera_mode):
-    command = build_publish_command(video_device_index, rtsp_url, camera_mode)
+def start_publisher(video_device_index, rtsp_url, camera_mode, encoder_override=None):
+    command = build_publish_command(video_device_index, rtsp_url, camera_mode, encoder_override)
     chosen_encoder = command[command.index('-c:v') + 1]
     print(
         f'starting MediaMTX publish: encoder={chosen_encoder} mode={camera_mode.input_format} '
@@ -582,6 +661,10 @@ def main():
     stream_enabled = False
     stream_disabled_since = None
     next_probe_at = 0.0
+    active_encoder = H264_ENCODER
+    active_mode_value = None
+    mode_cache = {}
+    available_encoders = detect_available_ffmpeg_encoders()
 
     while True:
         config = fetch_stream_config()
@@ -590,6 +673,7 @@ def main():
             cfg_board_name = (config.get('board_name') or '').strip()
             configured_rtsp_url = (config.get('rtsp_url') or '').strip()
             publish_url = PUBLISH_RTSP_URL or configured_rtsp_url
+            desired_encoder, desired_mode = resolve_profile_from_config(config)
             expected_suffix = f'/cars/{urllib_parse.quote(BOARD_NAME, safe="")}'
             if stream_enabled:
                 if cfg_board_name and cfg_board_name != BOARD_NAME:
@@ -604,6 +688,7 @@ def main():
                     )
         else:
             publish_url = active_publish_url
+            desired_encoder, desired_mode = resolve_profile_from_config(None)
 
         if stream_enabled:
             stream_disabled_since = None
@@ -629,12 +714,43 @@ def main():
                 time.sleep(STREAM_STATUS_POLL_SECONDS)
                 continue
 
-            if publisher_process is None or active_publish_url != publish_url:
+            cached_modes = mode_cache.get(active_video_device)
+            if cached_modes is None:
+                try:
+                    cached_modes = read_v4l2_modes(active_video_device) or []
+                except Exception as exc:
+                    print(f'camera capability probe failed while reporting modes: {exc}', file=sys.stderr)
+                    cached_modes = []
+                mode_cache[active_video_device] = cached_modes
+
+            desired_mode_value = format_mode_value(desired_mode)
+            encoder_changed = desired_encoder != active_encoder
+            mode_changed = desired_mode_value != active_mode_value
+            publish_changed = active_publish_url != publish_url
+
+            if publisher_process is None or publish_changed or encoder_changed or mode_changed:
                 stop_publisher(publisher_process, 'reconfigure')
-                camera_mode = resolve_camera_mode(active_video_device)
-                publisher_process = start_publisher(active_video_device, publish_url, camera_mode)
+                selected_mode = desired_mode
+                if cached_modes:
+                    chosen_mode = choose_camera_mode(cached_modes, desired_mode)
+                    if chosen_mode is None:
+                        print('no compatible camera mode available for requested profile; retrying', file=sys.stderr)
+                        time.sleep(STREAM_STATUS_POLL_SECONDS)
+                        continue
+                    selected_mode = chosen_mode
+                publisher_process = start_publisher(active_video_device, publish_url, selected_mode, desired_encoder)
                 stream_ffmpeg_stderr(publisher_process, active_video_device, publish_url)
                 active_publish_url = publish_url
+                active_encoder = desired_encoder
+                active_mode_value = format_mode_value(selected_mode)
+
+            report_stream_state(
+                active_video_device=active_video_device,
+                current_encoder=active_encoder,
+                current_mode=parse_mode_value(active_mode_value or ''),
+                available_modes=mode_cache.get(active_video_device) or [],
+                available_encoders=available_encoders,
+            )
 
             if publisher_process.poll() is not None:
                 stderr_tail = ''

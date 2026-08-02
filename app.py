@@ -188,6 +188,13 @@ def create_app(test_config=None):
             ensure_column('devices', 'last_seen_at', 'TEXT')
             ensure_column('devices', 'last_poll_ok', 'INTEGER DEFAULT 0')
             ensure_column('devices', 'last_poll_error', 'TEXT')
+            ensure_column('devices', 'preferred_h264_encoder', 'TEXT DEFAULT "libx264"')
+            ensure_column('devices', 'preferred_video_mode', 'TEXT')
+            ensure_column('devices', 'reported_h264_encoder', 'TEXT')
+            ensure_column('devices', 'reported_video_mode', 'TEXT')
+            ensure_column('devices', 'available_h264_encoders_json', 'TEXT')
+            ensure_column('devices', 'available_video_modes_json', 'TEXT')
+            ensure_column('devices', 'last_stream_report_at', 'TEXT')
             db.commit()
 
     def refresh_sessions():
@@ -274,6 +281,34 @@ def create_app(test_config=None):
         if hours:
             return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
         return f'{minutes:02d}:{seconds:02d}'
+
+    def parse_mode_value(mode_value):
+        raw = (mode_value or '').strip()
+        if not raw:
+            return None
+        parts = [part.strip() for part in raw.split(',')]
+        if len(parts) != 4:
+            return None
+        input_format = parts[0].lower()
+        try:
+            width = int(parts[1])
+            height = int(parts[2])
+            fps = float(parts[3])
+        except (TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0 or fps <= 0:
+            return None
+        return {
+            'input_format': input_format,
+            'width': width,
+            'height': height,
+            'fps': fps,
+        }
+
+    def format_mode_value(mode):
+        if not mode:
+            return None
+        return f"{mode['input_format']},{mode['width']},{mode['height']},{mode['fps']:g}"
 
     def get_user_view(user_id):
         db = get_db()
@@ -1155,10 +1190,95 @@ def create_app(test_config=None):
                     db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (delta_seconds, target_user_id))
                 else:
                     db.execute('UPDATE users SET balance = balance - ? WHERE id = ?', (delta_seconds, target_user_id))
+            elif action == 'set_video_profile':
+                device_id = request.form.get('device_id')
+                encoder = (request.form.get('h264_encoder') or '').strip()
+                mode_value = (request.form.get('video_mode') or '').strip()
+                allowed_encoders = {'libx264', 'h264_v4l2m2m'}
+                if encoder not in allowed_encoders:
+                    encoder = 'libx264'
+
+                parsed_mode = parse_mode_value(mode_value)
+                normalized_mode = format_mode_value(parsed_mode)
+
+                db.execute(
+                    'UPDATE devices SET preferred_h264_encoder = ?, preferred_video_mode = ? WHERE id = ?',
+                    (encoder, normalized_mode, device_id),
+                )
             db.commit()
 
         users = db.execute('SELECT id, username, balance, is_admin FROM users ORDER BY username').fetchall()
-        devices = db.execute('SELECT id, name, status, location FROM devices ORDER BY id').fetchall()
+        device_rows = db.execute(
+            '''
+            SELECT
+                id,
+                name,
+                status,
+                location,
+                preferred_h264_encoder,
+                preferred_video_mode,
+                reported_h264_encoder,
+                reported_video_mode,
+                available_h264_encoders_json,
+                available_video_modes_json,
+                last_stream_report_at
+            FROM devices
+            ORDER BY id
+            '''
+        ).fetchall()
+
+        devices = []
+        for row in device_rows:
+            item = dict(row)
+            try:
+                available_encoders = json.loads(item.get('available_h264_encoders_json') or '[]')
+            except Exception:
+                available_encoders = []
+            if not isinstance(available_encoders, list):
+                available_encoders = []
+            available_encoders = [str(value).strip() for value in available_encoders if str(value).strip()]
+
+            for encoder in ('libx264', 'h264_v4l2m2m'):
+                if encoder not in available_encoders:
+                    available_encoders.append(encoder)
+
+            try:
+                available_modes = json.loads(item.get('available_video_modes_json') or '[]')
+            except Exception:
+                available_modes = []
+            if not isinstance(available_modes, list):
+                available_modes = []
+
+            normalized_modes = []
+            for mode in available_modes:
+                parsed = parse_mode_value(
+                    format_mode_value(mode) if isinstance(mode, dict) else str(mode)
+                )
+                if parsed is None:
+                    continue
+                normalized_modes.append({
+                    **parsed,
+                    'value': format_mode_value(parsed),
+                    'label': f"{parsed['input_format']} {parsed['width']}x{parsed['height']}@{parsed['fps']:g}",
+                })
+
+            preferred_mode = parse_mode_value(item.get('preferred_video_mode'))
+            preferred_mode_value = format_mode_value(preferred_mode)
+            if preferred_mode and not any(mode['value'] == preferred_mode_value for mode in normalized_modes):
+                normalized_modes.insert(0, {
+                    **preferred_mode,
+                    'value': preferred_mode_value,
+                    'label': f"{preferred_mode['input_format']} {preferred_mode['width']}x{preferred_mode['height']}@{preferred_mode['fps']:g}",
+                })
+
+            item['available_h264_encoders'] = available_encoders
+            item['available_video_modes'] = normalized_modes
+            item['preferred_h264_encoder'] = item.get('preferred_h264_encoder') or 'libx264'
+            item['preferred_video_mode_value'] = preferred_mode_value or ''
+            item['reported_h264_encoder'] = item.get('reported_h264_encoder') or 'n/a'
+            item['reported_video_mode'] = item.get('reported_video_mode') or 'n/a'
+            devices.append(item)
+
         return render_template('admin.html', users=users, devices=devices, format_seconds=format_seconds)
 
     @app.route('/api/devices/register', methods=['POST'])
@@ -1265,9 +1385,73 @@ def create_app(test_config=None):
             return jsonify({'status': 'ok', 'action': None, 'board_name': board_name})
         return jsonify({'status': 'ok', 'action': action, 'board_name': board_name})
 
+    @app.route('/api/board/stream/report', methods=['POST'])
+    def board_stream_report():
+        if not board_request_is_authorized():
+            return jsonify({'status': 'error', 'message': 'invalid token'}), 403
+
+        payload = request.get_json(silent=True) or {}
+        board_name = normalize_board_name(payload.get('board_name') or resolve_board_name())
+        if not board_name:
+            return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
+
+        available_encoders = payload.get('available_h264_encoders')
+        if not isinstance(available_encoders, list):
+            available_encoders = []
+        available_encoders = [str(value).strip() for value in available_encoders if str(value).strip()]
+
+        available_modes_payload = payload.get('available_video_modes')
+        available_modes = []
+        if isinstance(available_modes_payload, list):
+            for mode in available_modes_payload:
+                if isinstance(mode, dict):
+                    mode_value = format_mode_value(mode)
+                else:
+                    mode_value = str(mode)
+                parsed_mode = parse_mode_value(mode_value)
+                if parsed_mode:
+                    available_modes.append(parsed_mode)
+
+        current_mode_payload = payload.get('current_video_mode')
+        if isinstance(current_mode_payload, dict):
+            current_mode = parse_mode_value(format_mode_value(current_mode_payload))
+        else:
+            current_mode = parse_mode_value(str(current_mode_payload or ''))
+
+        reported_encoder = (payload.get('current_h264_encoder') or '').strip() or None
+        current_mode_value = format_mode_value(current_mode)
+        db = get_db()
+        db.execute(
+            '''
+            UPDATE devices
+            SET
+                reported_h264_encoder = ?,
+                reported_video_mode = ?,
+                available_h264_encoders_json = ?,
+                available_video_modes_json = ?,
+                last_stream_report_at = ?
+            WHERE name = ?
+            ''',
+            (
+                reported_encoder,
+                current_mode_value,
+                json.dumps(available_encoders),
+                json.dumps(available_modes),
+                format_timestamp(datetime.now(timezone.utc)),
+                board_name,
+            ),
+        )
+        db.commit()
+        mark_board_activity_for_device('stream_report', board_name)
+        return jsonify({'status': 'ok', 'board_name': board_name})
+
     def resolve_board_stream_state(board_name, db=None):
         if db is None:
             db = get_db()
+        preferred_profile = {
+            'h264_encoder': 'libx264',
+            'video_mode': None,
+        }
         if board_name:
             active_row = db.execute(
                 """
@@ -1280,15 +1464,25 @@ def create_app(test_config=None):
                 """,
                 (board_name,),
             ).fetchone()
-            device_row = db.execute('SELECT id, status, last_seen_at FROM devices WHERE name = ?', (board_name,)).fetchone()
+            device_row = db.execute(
+                '''
+                SELECT id, status, last_seen_at, preferred_h264_encoder, preferred_video_mode
+                FROM devices
+                WHERE name = ?
+                ''',
+                (board_name,),
+            ).fetchone()
             device_online = bool(device_row and is_device_online(dict(device_row), datetime.now(timezone.utc)))
             enabled = bool(active_row is not None or (device_row is not None and device_online))
             stream_urls = build_stream_urls(board_name)
+            if device_row:
+                preferred_profile['h264_encoder'] = (device_row['preferred_h264_encoder'] or 'libx264').strip() or 'libx264'
+                preferred_profile['video_mode'] = device_row['preferred_video_mode']
         else:
             active_row = db.execute("SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1").fetchone()
             stream_urls = {'path': None, 'whep_url': None, 'rtsp_url': None}
             enabled = bool(active_row is not None)
-        return enabled, stream_urls
+        return enabled, stream_urls, preferred_profile
 
     @app.route('/api/board/stream/status')
     def board_stream_status():
@@ -1299,7 +1493,7 @@ def create_app(test_config=None):
 
         db = get_db()
         sync_device_statuses(db)
-        enabled, stream_urls = resolve_board_stream_state(board_name, db)
+        enabled, stream_urls, preferred_profile = resolve_board_stream_state(board_name, db)
 
         mark_board_activity_for_device('stream_status_poll', board_name)
         return jsonify({
@@ -1310,6 +1504,7 @@ def create_app(test_config=None):
             'stream_path': stream_urls['path'],
             'whep_url': stream_urls['whep_url'],
             'rtsp_url': stream_urls['rtsp_url'],
+            'video_profile': preferred_profile,
         })
 
     @app.route('/api/board/stream/config')
@@ -1322,7 +1517,7 @@ def create_app(test_config=None):
             return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
 
         db = get_db()
-        enabled, stream_urls = resolve_board_stream_state(board_name, db)
+        enabled, stream_urls, preferred_profile = resolve_board_stream_state(board_name, db)
 
         mark_board_activity_for_device('stream_config_poll', board_name)
         return jsonify({
@@ -1332,6 +1527,7 @@ def create_app(test_config=None):
             'stream_path': stream_urls['path'],
             'whep_url': stream_urls['whep_url'],
             'rtsp_url': stream_urls['rtsp_url'],
+            'video_profile': preferred_profile,
         })
 
     @app.route('/api/board/status')

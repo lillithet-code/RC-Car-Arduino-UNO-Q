@@ -69,7 +69,13 @@
       <h2>Vehicles</h2>
       <table>
         <thead>
-          <tr><th>Name</th><th>Status</th><th>Location</th></tr>
+          <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Location</th>
+            <th>Current Stream Profile</th>
+            <th>Set Stream Profile</th>
+          </tr>
         </thead>
         <tbody>
           {% for device in devices %}
@@ -77,6 +83,35 @@
             <td>{{ device.name }}</td>
             <td>{{ device.status }}</td>
             <td>{{ device.location }}</td>
+            <td>
+              <div>Encoder: {{ device.reported_h264_encoder }}</div>
+              <div>Mode: {{ device.reported_video_mode }}</div>
+              <div>Last report: {{ device.last_stream_report_at or 'n/a' }}</div>
+            </td>
+            <td>
+              <form method="post" class="inline-form">
+                <input type="hidden" name="action" value="set_video_profile">
+                <input type="hidden" name="device_id" value="{{ device.id }}">
+                <label>
+                  Encoder
+                  <select name="h264_encoder">
+                    {% for encoder in device.available_h264_encoders %}
+                    <option value="{{ encoder }}" {% if encoder == device.preferred_h264_encoder %}selected{% endif %}>{{ encoder }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>
+                  Mode
+                  <select name="video_mode">
+                    <option value="">(keep board default)</option>
+                    {% for mode in device.available_video_modes %}
+                    <option value="{{ mode.value }}" {% if mode.value == device.preferred_video_mode_value %}selected{% endif %}>{{ mode.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <button type="submit">Apply</button>
+              </form>
+            </td>
           </tr>
           {% endfor %}
         </tbody>
