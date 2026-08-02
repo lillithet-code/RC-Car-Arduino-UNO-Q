@@ -133,3 +133,16 @@ def test_ffmpeg_command_forces_browser_compatible_h264(monkeypatch):
     assert command[command.index('-bf') + 1] == '0'
     assert command[command.index('-video_size') + 1] == '1920x1080'
     assert command[command.index('-framerate') + 1] == '30'
+
+
+def test_ffmpeg_command_uses_nv12_for_v4l2_h264_encoder(monkeypatch):
+    monkeypatch.setattr(sender, 'resolve_h264_encoder', lambda: 'h264_v4l2m2m')
+    mode = sender.CameraMode('mjpeg', 1920, 1080, 30.0)
+
+    command = sender.build_publish_command(
+        0,
+        'rtsp://example.test:8554/cars/RCCar1',
+        mode,
+    )
+
+    assert command[command.index('-pix_fmt') + 1] == 'nv12'

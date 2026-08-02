@@ -546,7 +546,11 @@ def build_publish_command(video_device_index, rtsp_url, camera_mode=None):
         '-bufsize', H264_BUFSIZE,
     ]
 
-    if chosen_encoder == 'libx264':
+    if chosen_encoder == 'h264_v4l2m2m':
+        command.extend([
+            '-pix_fmt', 'nv12',
+        ])
+    elif chosen_encoder == 'libx264':
         command.extend([
             '-pix_fmt', 'yuv420p',
             '-profile:v', H264_PROFILE,
