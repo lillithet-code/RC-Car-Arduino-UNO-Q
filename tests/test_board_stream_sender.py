@@ -45,9 +45,9 @@ ioctl: VIDIOC_ENUM_FMT
     assert sender.CameraMode('mjpeg', 1920, 1080, 15.0) in modes
 
 
-def test_resolve_h264_encoder_uses_v4l2_m2m_by_default():
+def test_resolve_h264_encoder_uses_libx264_by_default():
     selected = sender.resolve_h264_encoder()
-    assert selected == 'h264_v4l2m2m'
+    assert selected == 'libx264'
 
 
 def test_detect_available_ffmpeg_encoders_parses_ffmpeg_flag_column(monkeypatch):

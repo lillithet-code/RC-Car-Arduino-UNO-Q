@@ -66,8 +66,8 @@ python3 board_commands.py
 - `BOARD_NAME`: unique car identity
 - `VIDEO_DEVICE`: camera index or `/dev/videoN` or `auto`
 - `VIDEO_MODE_AUTO`: select the closest supported V4L2 mode when the requested mode is unavailable (default `1`)
-- `VIDEO_WIDTH`, `VIDEO_HEIGHT`, `FRAME_RATE`: preferred capture mode (defaults `1024x576@30`)
-- `H264_ENCODER`: defaults to `h264_v4l2m2m`; set an available encoder explicitly if the board does not provide it
+- `VIDEO_WIDTH`, `VIDEO_HEIGHT`, `FRAME_RATE`: preferred capture mode (defaults `1280x720@25`)
+- `H264_ENCODER`: defaults to `libx264`; set an available encoder explicitly if the board supports low-latency hardware encode reliably
 - `COMMAND_WS_URL`: optional explicit command WS URL
 - `MEDIAMTX_RTSP_URL`: optional fixed override target (if not using server-provided URL)
 
