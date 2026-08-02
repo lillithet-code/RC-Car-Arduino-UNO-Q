@@ -20,8 +20,41 @@
     .top-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
     .session-layout { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; }
     .video-panel { flex: 1 1 0; min-width: 320px; }
+    .video-stage { position: relative; width: 100%; max-width: 720px; }
+    .stream-surface { width: 100%; position: relative; }
     .joystick-panel { width: 260px; display: flex; flex-direction: column; align-items: center; }
     .stream { width: 100%; max-width: 720px; border-radius: 20px; border: 2px solid #334155; }
+    .fullscreen-toggle {
+      position: absolute;
+      top: 0.8rem;
+      right: 0.8rem;
+      z-index: 7;
+      display: inline-block;
+      padding: 0.35rem 0.6rem;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.55);
+      background: rgba(15, 23, 42, 0.78);
+      color: #e2e8f0;
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 700;
+      backdrop-filter: blur(4px);
+    }
+    .fullscreen-time {
+      position: absolute;
+      top: 0.8rem;
+      left: 0.8rem;
+      z-index: 7;
+      display: none;
+      padding: 0.4rem 0.7rem;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(148, 163, 184, 0.45);
+      color: #f8fafc;
+      font-weight: 700;
+      font-size: 0.9rem;
+      backdrop-filter: blur(4px);
+    }
     .stream-diagnostics { max-width: 720px; margin-top: 0.75rem; padding: 0.85rem 1rem; border-radius: 14px; border: 1px solid rgba(251,191,36,0.45); background: rgba(120,53,15,0.2); color: #fde68a; }
     .stream-diagnostics.ok { border-color: rgba(34,197,94,0.45); background: rgba(20,83,45,0.24); color: #86efac; }
     .stream-diagnostics.error { border-color: rgba(248,113,113,0.55); background: rgba(127,29,29,0.24); color: #fecaca; }
@@ -31,6 +64,62 @@
     .stream-diagnostics code { color: #e2e8f0; }
     .joystick { width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle at center, #1e3a8a 0%, #0f172a 70%); position: relative; border: 3px solid #60a5fa; touch-action: none; }
     .knob { width: 70px; height: 70px; border-radius: 50%; background: linear-gradient(135deg, #fbbf24, #f59e0b); position: absolute; top: 75px; left: 75px; cursor: pointer; }
+    .fullscreen-joystick {
+      position: fixed;
+      display: none;
+      z-index: 8;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .session-layout:fullscreen {
+      width: 100vw;
+      height: 100vh;
+      max-width: none;
+      background: #000;
+      display: block;
+      position: relative;
+      margin: 0;
+      padding: 0;
+    }
+    .session-layout:fullscreen .video-panel {
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+    }
+    .session-layout:fullscreen .video-stage {
+      width: 100%;
+      height: 100%;
+      max-width: none;
+    }
+    .session-layout:fullscreen .stream-surface {
+      width: 100%;
+      height: 100%;
+    }
+    .session-layout:fullscreen .stream {
+      width: 100%;
+      height: 100%;
+      max-width: none;
+      border: 0;
+      border-radius: 0;
+      object-fit: contain;
+      background: #000;
+    }
+    .session-layout:fullscreen .joystick-panel {
+      display: none;
+    }
+    .session-layout:fullscreen .fullscreen-time {
+      display: inline-block;
+    }
+    .session-layout:fullscreen .stream-diagnostics {
+      position: absolute;
+      left: 1rem;
+      right: 1rem;
+      bottom: 1rem;
+      max-width: min(92vw, 760px);
+      z-index: 7;
+      margin-top: 0;
+      background: rgba(15, 23, 42, 0.6);
+    }
   </style>
 </head>
 <body>
@@ -63,9 +152,18 @@
       <h2>Current Session</h2>
       {% if active_session %}
         <p>Connected to {{ active_session.name }}. Your time is counting down live.</p>
-        <div class="session-layout">
+        <div class="session-layout" id="session-layout">
           <div class="video-panel">
-            <video id="stream-video" class="stream" autoplay playsinline muted style="display:none;"></video>
+            <div class="video-stage" id="video-stage">
+              <a href="#" id="fullscreen-toggle" class="fullscreen-toggle">Fullscreen</a>
+              <div id="fullscreen-time" class="fullscreen-time"></div>
+              <div class="stream-surface">
+                <video id="stream-video" class="stream" autoplay playsinline muted style="display:none;"></video>
+              </div>
+              <div class="joystick fullscreen-joystick" id="fullscreen-joystick">
+                <div class="knob" id="fullscreen-knob"></div>
+              </div>
+            </div>
             <div id="stream-diagnostics" class="stream-diagnostics" style="display:none;"></div>
           </div>
           <div class="joystick-panel">
@@ -82,9 +180,15 @@
   <script>
     const joystick = document.getElementById('joystick');
     const knob = document.getElementById('knob');
+    const fullscreenJoystick = document.getElementById('fullscreen-joystick');
+    const fullscreenKnob = document.getElementById('fullscreen-knob');
     const streamVideo = document.getElementById('stream-video');
     const streamDiagnostics = document.getElementById('stream-diagnostics');
     const remainingTime = document.getElementById('remaining-time');
+    const fullscreenTime = document.getElementById('fullscreen-time');
+    const fullscreenToggle = document.getElementById('fullscreen-toggle');
+    const sessionLayout = document.getElementById('session-layout');
+    const videoStage = document.getElementById('video-stage');
     const streamRefreshIntervalMs = 500;
     const commandHeartbeatIntervalMs = 120;
     const webRtcRetryBaseMs = 1000;
@@ -114,6 +218,19 @@
     let lastIceGatheringState = 'new';
     let localOfferData = null;
     let queuedIceCandidates = [];
+    let activeJoystick = null;
+    let fullscreenPointerId = null;
+
+    function isFullscreenActive() {
+      return Boolean(sessionLayout && document.fullscreenElement === sessionLayout);
+    }
+
+    function updateFullscreenToggleLabel() {
+      if (!fullscreenToggle) {
+        return;
+      }
+      fullscreenToggle.textContent = isFullscreenActive() ? 'Exit Fullscreen' : 'Fullscreen';
+    }
 
     function escapeHtml(value) {
       return String(value || '')
@@ -195,6 +312,7 @@
         streamVideo.style.display = 'none';
         streamVideo.srcObject = null;
       }
+      hideFullscreenJoystick();
       renderStreamDiagnostics();
     }
 
@@ -323,15 +441,106 @@
         return;
       }
       const safe = Math.max(0, Number(remainingSeconds) || 0);
+      let textValue = formatSeconds(safe);
       if (!hasSession) {
-        remainingTime.textContent = formatSeconds(safe);
+        remainingTime.textContent = textValue;
+        if (fullscreenTime) {
+          fullscreenTime.textContent = `Time left ${textValue}`;
+        }
         return;
       }
       if (billingIsStarted && streamIsReady) {
-        remainingTime.textContent = formatSeconds(safe);
+        remainingTime.textContent = textValue;
       } else {
-        remainingTime.textContent = `${formatSeconds(safe)} (waiting for stream)`;
+        textValue = `${textValue} (waiting for stream)`;
+        remainingTime.textContent = textValue;
       }
+      if (fullscreenTime) {
+        fullscreenTime.textContent = `Time left ${textValue}`;
+      }
+    }
+
+    function resetKnob(knobElement) {
+      if (!knobElement) {
+        return;
+      }
+      knobElement.style.left = '75px';
+      knobElement.style.top = '75px';
+    }
+
+    function updateFromPointer(joystickElement, knobElement, x, y) {
+      if (!joystickElement || !knobElement) {
+        return;
+      }
+      const rect = joystickElement.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const dx = Math.max(-1, Math.min(1, (x - centerX) / (rect.width / 2)));
+      const dy = Math.max(-1, Math.min(1, (y - centerY) / (rect.height / 2)));
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+      let action = 'stop';
+      if (absX > absY) {
+        action = dx > 0 ? 'right' : 'left';
+      } else if (absY > absX) {
+        action = dy > 0 ? 'back' : 'forward';
+      }
+      knobElement.style.left = `${75 + dx * 55}px`;
+      knobElement.style.top = `${75 + dy * 55}px`;
+      sendAction(action);
+    }
+
+    function showFullscreenJoystickAt(x, y) {
+      if (!fullscreenJoystick) {
+        return;
+      }
+      fullscreenJoystick.style.left = `${x}px`;
+      fullscreenJoystick.style.top = `${y}px`;
+      fullscreenJoystick.style.display = 'block';
+      resetKnob(fullscreenKnob);
+    }
+
+    function hideFullscreenJoystick() {
+      if (!fullscreenJoystick) {
+        return;
+      }
+      fullscreenJoystick.style.display = 'none';
+      resetKnob(fullscreenKnob);
+    }
+
+    function endJoystickDrag(forceStop = true) {
+      if (!dragging) {
+        return;
+      }
+      dragging = false;
+      fullscreenPointerId = null;
+      if (activeJoystick) {
+        resetKnob(activeJoystick.knob);
+      }
+      activeJoystick = null;
+      hideFullscreenJoystick();
+      if (forceStop) {
+        sendAction('stop', true);
+      }
+    }
+
+    async function toggleFullscreen(event) {
+      if (event) {
+        event.preventDefault();
+      }
+      if (!sessionLayout) {
+        return;
+      }
+      try {
+        if (isFullscreenActive()) {
+          await document.exitFullscreen();
+        } else {
+          await sessionLayout.requestFullscreen();
+        }
+      } catch (error) {
+        // Ignore fullscreen permission errors.
+      }
+      updateFullscreenToggleLabel();
     }
 
     function isStreamSurfaceVisible() {
@@ -753,50 +962,78 @@
       }).catch(() => {});
     }
 
-    function updateFromPointer(x, y) {
-      const rect = joystick.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
-      const dx = Math.max(-1, Math.min(1, (x - centerX) / (rect.width / 2)));
-      const dy = Math.max(-1, Math.min(1, (y - centerY) / (rect.height / 2)));
-      const absX = Math.abs(dx);
-      const absY = Math.abs(dy);
-      let action = 'stop';
-      if (absX > absY) {
-        action = dx > 0 ? 'right' : 'left';
-      } else if (absY > absX) {
-        action = dy > 0 ? 'back' : 'forward';
-      }
-      knob.style.left = `${75 + dx * 55}px`;
-      knob.style.top = `${75 + dy * 55}px`;
-      sendAction(action);
-    }
-
     if (joystick && knob) {
       joystick.addEventListener('pointerdown', (event) => {
       dragging = true;
+      fullscreenPointerId = event.pointerId;
+      activeJoystick = { joystick, knob };
       joystick.setPointerCapture(event.pointerId);
-      updateFromPointer(event.clientX, event.clientY);
+      updateFromPointer(joystick, knob, event.clientX, event.clientY);
       });
 
       joystick.addEventListener('pointermove', (event) => {
-      if (!dragging) return;
-      updateFromPointer(event.clientX, event.clientY);
+      if (!dragging || !activeJoystick || activeJoystick.joystick !== joystick || fullscreenPointerId !== event.pointerId) return;
+      updateFromPointer(joystick, knob, event.clientX, event.clientY);
       });
 
       joystick.addEventListener('pointerup', () => {
-      dragging = false;
-      knob.style.left = '75px';
-      knob.style.top = '75px';
-      sendAction('stop', true);
+      endJoystickDrag(true);
       });
       joystick.addEventListener('pointercancel', () => {
-      dragging = false;
-      knob.style.left = '75px';
-      knob.style.top = '75px';
-      sendAction('stop', true);
+      endJoystickDrag(true);
       });
     }
+
+    if (videoStage) {
+      videoStage.addEventListener('pointerdown', (event) => {
+        if (!isFullscreenActive() || !hasActiveSession) {
+          return;
+        }
+        if (event.target && event.target.closest && event.target.closest('#fullscreen-toggle')) {
+          return;
+        }
+        dragging = true;
+        fullscreenPointerId = event.pointerId;
+        activeJoystick = { joystick: fullscreenJoystick, knob: fullscreenKnob };
+        showFullscreenJoystickAt(event.clientX, event.clientY);
+        updateFromPointer(fullscreenJoystick, fullscreenKnob, event.clientX, event.clientY);
+      });
+
+      videoStage.addEventListener('pointermove', (event) => {
+        if (!isFullscreenActive() || !dragging || !activeJoystick || activeJoystick.joystick !== fullscreenJoystick) {
+          return;
+        }
+        if (fullscreenPointerId !== event.pointerId) {
+          return;
+        }
+        updateFromPointer(fullscreenJoystick, fullscreenKnob, event.clientX, event.clientY);
+      });
+
+      videoStage.addEventListener('pointerup', (event) => {
+        if (activeJoystick && activeJoystick.joystick === fullscreenJoystick && event.pointerId === fullscreenPointerId) {
+          endJoystickDrag(true);
+        }
+      });
+
+      videoStage.addEventListener('pointercancel', (event) => {
+        if (activeJoystick && activeJoystick.joystick === fullscreenJoystick && event.pointerId === fullscreenPointerId) {
+          endJoystickDrag(true);
+        }
+      });
+    }
+
+    if (fullscreenToggle) {
+      fullscreenToggle.addEventListener('click', toggleFullscreen);
+      updateFullscreenToggleLabel();
+    }
+
+    document.addEventListener('fullscreenchange', () => {
+      if (!isFullscreenActive()) {
+        endJoystickDrag(true);
+      }
+      updateFullscreenToggleLabel();
+      renderStreamDiagnostics();
+    });
 
     setInterval(() => {
       if (!hasActiveSession) {
