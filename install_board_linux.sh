@@ -241,10 +241,19 @@ if command -v getent >/dev/null 2>&1 && getent group video >/dev/null 2>&1; then
 fi
 
 python3 -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install --upgrade pip
-"$VENV_DIR/bin/pip" install -r "$BOARD_DIR/requirements.txt"
-"$VENV_DIR/bin/pip" install pyserial
-"$VENV_DIR/bin/pip" install msgpack
+
+# A checkout path rename can leave stale venv entrypoints with dead shebangs.
+# Validate the venv and recreate it once when python/pip is unusable.
+if [[ ! -x "$VENV_DIR/bin/python3" ]] || ! "$VENV_DIR/bin/python3" -m pip --version >/dev/null 2>&1; then
+  echo "Recreating virtualenv due to invalid entrypoints: $VENV_DIR"
+  rm -rf "$VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+fi
+
+"$VENV_DIR/bin/python3" -m pip install --upgrade pip
+"$VENV_DIR/bin/python3" -m pip install -r "$BOARD_DIR/requirements.txt"
+"$VENV_DIR/bin/python3" -m pip install pyserial
+"$VENV_DIR/bin/python3" -m pip install msgpack
 
 if [[ "$VIDEO_DEVICE" =~ ^/dev/video([0-9]+)$ ]]; then
   VIDEO_DEVICE="${BASH_REMATCH[1]}"
