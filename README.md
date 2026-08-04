@@ -83,6 +83,8 @@ python3 rpi4b_board_commands.py
 Raspberry Pi 4B + Pi Camera 3 variables:
 - `FRAME_RATE`: Pi camera stream frame rate (default `60`, aligned with tether-rally profile)
 - `PICAMERA_BITRATE`: H.264 bitrate for Pi camera app (default `2000000`, aligned with tether-rally profile)
+- `PICAMERA_PROFILE`: optional H.264 profile passed to Pi camera app (default `baseline`)
+- `PICAMERA_LEVEL`: optional H.264 level passed to Pi camera app (default empty; set only if your Pi camera build supports it)
 - `LIBCAMERA_BIN`: optional override camera binary path/name; auto-detects `rpicam-vid` then `libcamera-vid`
 - `GPIO_DRY_RUN`: if `1`, logs commands without toggling GPIO
 - `DRIVE_IN1_PIN`, `DRIVE_IN2_PIN`: DRV8871 drivetrain PWM pins (defaults `18`, `19`)

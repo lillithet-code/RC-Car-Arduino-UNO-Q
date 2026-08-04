@@ -21,6 +21,8 @@ FRAME_RATE = float(os.environ.get('FRAME_RATE', '60'))
 VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1280'))
 VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
 PICAMERA_BITRATE = int(os.environ.get('PICAMERA_BITRATE', '2000000'))
+PICAMERA_PROFILE = (os.environ.get('PICAMERA_PROFILE', 'baseline') or '').strip()
+PICAMERA_LEVEL = (os.environ.get('PICAMERA_LEVEL', '') or '').strip()
 PUBLISH_RTSP_URL = os.environ.get('MEDIAMTX_RTSP_URL', '').strip()
 LIBCAMERA_BIN = os.environ.get('LIBCAMERA_BIN', '').strip()
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip() or 'ffmpeg'
@@ -180,13 +182,11 @@ def resolve_profile_from_config(config_payload):
 
 
 def build_libcamera_command(camera_mode):
-    return [
+    command = [
         PICAMERA_BIN,
         '--nopreview',
         '--inline',
         '--codec', 'h264',
-        '--profile', 'baseline',
-        '--level', '4.0',
         '--width', str(camera_mode.width),
         '--height', str(camera_mode.height),
         '--framerate', f'{camera_mode.fps:g}',
@@ -194,6 +194,14 @@ def build_libcamera_command(camera_mode):
         '--timeout', '0',
         '--output', '-',
     ]
+
+    if PICAMERA_PROFILE:
+        command.extend(['--profile', PICAMERA_PROFILE])
+
+    if PICAMERA_LEVEL:
+        command.extend(['--level', PICAMERA_LEVEL])
+
+    return command
 
 
 def build_ffmpeg_publish_command(rtsp_url):
