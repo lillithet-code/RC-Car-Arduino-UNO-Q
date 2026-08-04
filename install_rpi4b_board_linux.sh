@@ -109,10 +109,20 @@ cd "$BOARD_DIR"
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
   sudo apt-get install -y python3 python3-pip python3-venv ffmpeg libcamera-apps python3-gpiozero
-  if apt-cache show pigpio >/dev/null 2>&1; then
-    sudo apt-get install -y pigpio python3-pigpio
+
+  PIGPIO_CANDIDATE="$(apt-cache policy pigpio 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+  PYTHON3_PIGPIO_CANDIDATE="$(apt-cache policy python3-pigpio 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+
+  if [[ -n "$PIGPIO_CANDIDATE" && "$PIGPIO_CANDIDATE" != "(none)" ]]; then
+    sudo apt-get install -y pigpio
   else
     echo "pigpio package not available on this distro; continuing with gpiozero default pin factory"
+  fi
+
+  if [[ -n "$PYTHON3_PIGPIO_CANDIDATE" && "$PYTHON3_PIGPIO_CANDIDATE" != "(none)" ]]; then
+    sudo apt-get install -y python3-pigpio
+  else
+    echo "python3-pigpio package not available on this distro; continuing without pigpio Python bindings"
   fi
 fi
 
