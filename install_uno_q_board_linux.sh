@@ -6,9 +6,9 @@ LEGACY_BOARD_DIR="${LEGACY_BOARD_DIR:-$HOME/RC-Car-Arduino-UNO-Q}"
 VENV_DIR="${VENV_DIR:-$BOARD_DIR/.venv}"
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
-if [[ -f "$SCRIPT_DIR/board_install_helpers.sh" ]]; then
+if [[ -f "$SCRIPT_DIR/uno_q_board_install_helpers.sh" ]]; then
   # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/board_install_helpers.sh"
+  source "$SCRIPT_DIR/uno_q_board_install_helpers.sh"
 fi
 
 read_existing_env_value() {
@@ -214,7 +214,7 @@ sync_runtime_files() {
   local target_dir="$BOARD_DIR"
 
   mkdir -p "$target_dir"
-  for relative_path in board_stream_sender.py board_commands.py requirements.txt; do
+  for relative_path in uno_q_board_stream_sender.py uno_q_board_commands.py requirements.txt; do
     local source_file="$source_dir/$relative_path"
     local target_file="$target_dir/$relative_path"
     if [[ -f "$source_file" ]]; then
@@ -331,9 +331,9 @@ if [[ -f "$DIR/.env" ]]; then
 fi
 set +a
 export PYTHONUNBUFFERED=1
-python3 -u "$DIR/board_stream_sender.py" &
+python3 -u "$DIR/uno_q_board_stream_sender.py" &
 STREAM_PID=$!
-python3 -u "$DIR/board_commands.py" &
+python3 -u "$DIR/uno_q_board_commands.py" &
 COMMAND_PID=$!
 
 shutdown_children() {

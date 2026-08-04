@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-import board_stream_sender as sender
+import uno_q_board_stream_sender as sender
 
 
 V4L2_SAMPLE = """

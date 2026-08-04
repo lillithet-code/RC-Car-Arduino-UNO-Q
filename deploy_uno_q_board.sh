@@ -3,12 +3,12 @@ set -euo pipefail
 
 BOARD_HOST="${1:-user@board-host}"
 BOARD_DIR="${BOARD_DIR:-/home/user/rc-car-arduino-uno-q}"
-REMOTE_SCRIPT="$BOARD_DIR/install_board_linux.sh"
+REMOTE_SCRIPT="$BOARD_DIR/install_uno_q_board_linux.sh"
 SERVER_URL="${SERVER_URL:-https://drive.kbob.org}"
 BOARD_TOKEN="${BOARD_TOKEN:-}"
 
 if [[ -z "${BOARD_HOST}" ]]; then
-  echo "Usage: ./deploy_board.sh user@board-host" >&2
+  echo "Usage: ./deploy_uno_q_board.sh user@board-host" >&2
   exit 1
 fi
 

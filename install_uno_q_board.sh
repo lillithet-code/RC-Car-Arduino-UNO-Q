@@ -2,4 +2,4 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/install_board_linux.sh" "$@"
+exec "$SCRIPT_DIR/install_uno_q_board_linux.sh" "$@"

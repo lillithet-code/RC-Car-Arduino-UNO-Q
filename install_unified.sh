@@ -117,7 +117,7 @@ install_board() {
     echo "Copy the BOARD_TOKEN from the server .env into install_unified.local.conf." >&2
     exit 1
   fi
-  ./install_board_linux.sh
+  ./install_uno_q_board_linux.sh
 
   echo "Restarting board service"
   sudo systemctl restart rc-car-board

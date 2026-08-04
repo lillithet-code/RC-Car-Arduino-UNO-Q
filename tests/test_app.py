@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import board_commands
+import uno_q_board_commands as board_commands
 from app import create_app
 
 

@@ -18,8 +18,8 @@ Remote RC car control stack with per-car session isolation, MediaMTX passthrough
    - Receives published H.264 stream for each car path
    - Relays to browser via WHEP/WebRTC
 - Board Linux helpers:
-   - `board_stream_sender.py` publishes camera to MediaMTX RTSP target from server config
-   - `board_commands.py` consumes per-car command WebSocket and writes serial/RPC commands to MCU
+   - `uno_q_board_stream_sender.py` publishes camera to MediaMTX RTSP target from server config
+   - `uno_q_board_commands.py` consumes per-car command WebSocket and writes serial/RPC commands to MCU
 - Arduino firmware:
    - Stops drivetrain if no motion command arrives for ~550 ms
 
@@ -56,8 +56,8 @@ through the provider and host firewalls for WebRTC media.
 
 5. On board Linux side, run helpers:
 ```bash
-python3 board_stream_sender.py
-python3 board_commands.py
+python3 uno_q_board_stream_sender.py
+python3 uno_q_board_commands.py
 ```
 
 ## Board-side variables
@@ -109,7 +109,7 @@ Server app install:
 
 Board install:
 ```bash
-./install_board_linux.sh
+./install_uno_q_board_linux.sh
 ```
 
 MediaMTX config template is included in `mediamtx.yml`.

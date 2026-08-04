@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TEST_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER_PATH="$TEST_ROOT/board_install_helpers.sh"
+HELPER_PATH="$TEST_ROOT/uno_q_board_install_helpers.sh"
 
 if [[ ! -f "$HELPER_PATH" ]]; then
   echo "helper script not found: $HELPER_PATH" >&2
