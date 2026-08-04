@@ -7,9 +7,11 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 try:
-    from gpiozero import DigitalOutputDevice
+    from gpiozero import AngularServo, DigitalOutputDevice, PWMOutputDevice
 except Exception:  # pragma: no cover - runtime environment dependent
+    AngularServo = None
     DigitalOutputDevice = None
+    PWMOutputDevice = None
 
 try:
     from websocket import create_connection
@@ -26,8 +28,17 @@ GPIO_DRY_RUN = os.environ.get('GPIO_DRY_RUN', '0').strip().lower() in {'1', 'tru
 
 DRIVE_IN1_PIN = int(os.environ.get('DRIVE_IN1_PIN', '17'))
 DRIVE_IN2_PIN = int(os.environ.get('DRIVE_IN2_PIN', '27'))
-STEER_IN1_PIN = int(os.environ.get('STEER_IN1_PIN', '22'))
-STEER_IN2_PIN = int(os.environ.get('STEER_IN2_PIN', '23'))
+SERVO_PIN = int(os.environ.get('SERVO_PIN', '12'))
+SERVO_LEFT_ANGLE = float(os.environ.get('SERVO_LEFT_ANGLE', '-30'))
+SERVO_CENTER_ANGLE = float(os.environ.get('SERVO_CENTER_ANGLE', '0'))
+SERVO_RIGHT_ANGLE = float(os.environ.get('SERVO_RIGHT_ANGLE', '30'))
+SERVO_MIN_ANGLE = float(os.environ.get('SERVO_MIN_ANGLE', '-90'))
+SERVO_MAX_ANGLE = float(os.environ.get('SERVO_MAX_ANGLE', '90'))
+SERVO_MIN_PULSE_WIDTH = float(os.environ.get('SERVO_MIN_PULSE_WIDTH', '0.0005'))
+SERVO_MAX_PULSE_WIDTH = float(os.environ.get('SERVO_MAX_PULSE_WIDTH', '0.0025'))
+SERVO_FRAME_WIDTH = float(os.environ.get('SERVO_FRAME_WIDTH', '0.02'))
+FORWARD_THROTTLE = max(0.0, min(1.0, float(os.environ.get('FORWARD_THROTTLE', '0.65'))))
+BACK_THROTTLE = max(0.0, min(1.0, float(os.environ.get('BACK_THROTTLE', '0.5'))))
 LIGHTS_PIN = int(os.environ.get('LIGHTS_PIN', '24'))
 GPIO_ACTIVE_HIGH = os.environ.get('GPIO_ACTIVE_HIGH', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 
@@ -36,30 +47,51 @@ class CarGPIODriver:
     def __init__(self, dry_run=False):
         self.dry_run = dry_run
         self._devices = {}
+        self._servo = None
 
         if self.dry_run:
             print('GPIO dry-run enabled; commands will be logged only')
             return
 
-        if DigitalOutputDevice is None:
+        if DigitalOutputDevice is None or PWMOutputDevice is None or AngularServo is None:
             raise RuntimeError('gpiozero is required on Raspberry Pi (or set GPIO_DRY_RUN=1 for testing)')
 
         self._devices = {
-            'drive_in1': DigitalOutputDevice(DRIVE_IN1_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
-            'drive_in2': DigitalOutputDevice(DRIVE_IN2_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
-            'steer_in1': DigitalOutputDevice(STEER_IN1_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
-            'steer_in2': DigitalOutputDevice(STEER_IN2_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
+            'drive_in1': PWMOutputDevice(DRIVE_IN1_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=0.0, frequency=1000),
+            'drive_in2': PWMOutputDevice(DRIVE_IN2_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=0.0, frequency=1000),
             'lights': DigitalOutputDevice(LIGHTS_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
         }
+        self._servo = AngularServo(
+            SERVO_PIN,
+            min_angle=SERVO_MIN_ANGLE,
+            max_angle=SERVO_MAX_ANGLE,
+            min_pulse_width=SERVO_MIN_PULSE_WIDTH,
+            max_pulse_width=SERVO_MAX_PULSE_WIDTH,
+            frame_width=SERVO_FRAME_WIDTH,
+        )
+        self._servo.angle = SERVO_CENTER_ANGLE
 
     def _set(self, name, value):
         device = self._devices.get(name)
         if device is None:
             return
+        if isinstance(device, PWMOutputDevice):
+            device.value = max(0.0, min(1.0, float(value)))
+            return
         if value:
             device.on()
-        else:
-            device.off()
+            return
+        device.off()
+
+    def _set_throttle(self, forward_duty, reverse_duty):
+        self._set('drive_in1', forward_duty)
+        self._set('drive_in2', reverse_duty)
+
+    def _set_steering(self, angle):
+        if self._servo is None:
+            return
+        clamped = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, float(angle)))
+        self._servo.angle = clamped
 
     def apply_action(self, action):
         if not action:
@@ -71,26 +103,20 @@ class CarGPIODriver:
             return command in {'forward', 'back', 'left', 'right', 'stop', 'lights_on', 'lights_off'}
 
         if command == 'forward':
-            self._set('drive_in1', True)
-            self._set('drive_in2', False)
+            self._set_throttle(FORWARD_THROTTLE, 0.0)
             return True
         if command == 'back':
-            self._set('drive_in1', False)
-            self._set('drive_in2', True)
+            self._set_throttle(0.0, BACK_THROTTLE)
             return True
         if command == 'left':
-            self._set('steer_in1', True)
-            self._set('steer_in2', False)
+            self._set_steering(SERVO_LEFT_ANGLE)
             return True
         if command == 'right':
-            self._set('steer_in1', False)
-            self._set('steer_in2', True)
+            self._set_steering(SERVO_RIGHT_ANGLE)
             return True
         if command == 'stop':
-            self._set('drive_in1', False)
-            self._set('drive_in2', False)
-            self._set('steer_in1', False)
-            self._set('steer_in2', False)
+            self._set_throttle(0.0, 0.0)
+            self._set_steering(SERVO_CENTER_ANGLE)
             return True
         if command == 'lights_on':
             self._set('lights', True)
@@ -104,6 +130,11 @@ class CarGPIODriver:
     def close(self):
         if self.dry_run:
             return
+        if self._servo is not None:
+            try:
+                self._servo.close()
+            except Exception:
+                pass
         for device in self._devices.values():
             try:
                 device.close()

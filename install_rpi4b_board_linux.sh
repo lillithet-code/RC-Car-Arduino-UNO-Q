@@ -54,8 +54,17 @@ MEDIAMTX_RTSP_URL="$(resolve_config_value MEDIAMTX_RTSP_URL '')"
 GPIO_DRY_RUN="$(resolve_config_value GPIO_DRY_RUN 0)"
 DRIVE_IN1_PIN="$(resolve_config_value DRIVE_IN1_PIN 17)"
 DRIVE_IN2_PIN="$(resolve_config_value DRIVE_IN2_PIN 27)"
-STEER_IN1_PIN="$(resolve_config_value STEER_IN1_PIN 22)"
-STEER_IN2_PIN="$(resolve_config_value STEER_IN2_PIN 23)"
+FORWARD_THROTTLE="$(resolve_config_value FORWARD_THROTTLE 0.65)"
+BACK_THROTTLE="$(resolve_config_value BACK_THROTTLE 0.5)"
+SERVO_PIN="$(resolve_config_value SERVO_PIN 12)"
+SERVO_LEFT_ANGLE="$(resolve_config_value SERVO_LEFT_ANGLE -30)"
+SERVO_CENTER_ANGLE="$(resolve_config_value SERVO_CENTER_ANGLE 0)"
+SERVO_RIGHT_ANGLE="$(resolve_config_value SERVO_RIGHT_ANGLE 30)"
+SERVO_MIN_ANGLE="$(resolve_config_value SERVO_MIN_ANGLE -90)"
+SERVO_MAX_ANGLE="$(resolve_config_value SERVO_MAX_ANGLE 90)"
+SERVO_MIN_PULSE_WIDTH="$(resolve_config_value SERVO_MIN_PULSE_WIDTH 0.0005)"
+SERVO_MAX_PULSE_WIDTH="$(resolve_config_value SERVO_MAX_PULSE_WIDTH 0.0025)"
+SERVO_FRAME_WIDTH="$(resolve_config_value SERVO_FRAME_WIDTH 0.02)"
 LIGHTS_PIN="$(resolve_config_value LIGHTS_PIN 24)"
 GPIO_ACTIVE_HIGH="$(resolve_config_value GPIO_ACTIVE_HIGH 1)"
 BOARD_RUN_USER="${BOARD_RUN_USER:-}"
@@ -99,7 +108,7 @@ cd "$BOARD_DIR"
 
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
-  sudo apt-get install -y python3 python3-pip python3-venv ffmpeg libcamera-apps python3-gpiozero
+  sudo apt-get install -y python3 python3-pip python3-venv ffmpeg libcamera-apps python3-gpiozero pigpio python3-pigpio
 fi
 
 if command -v getent >/dev/null 2>&1 && getent group video >/dev/null 2>&1; then
@@ -137,8 +146,17 @@ MEDIAMTX_RTSP_URL=$MEDIAMTX_RTSP_URL
 GPIO_DRY_RUN=$GPIO_DRY_RUN
 DRIVE_IN1_PIN=$DRIVE_IN1_PIN
 DRIVE_IN2_PIN=$DRIVE_IN2_PIN
-STEER_IN1_PIN=$STEER_IN1_PIN
-STEER_IN2_PIN=$STEER_IN2_PIN
+FORWARD_THROTTLE=$FORWARD_THROTTLE
+BACK_THROTTLE=$BACK_THROTTLE
+SERVO_PIN=$SERVO_PIN
+SERVO_LEFT_ANGLE=$SERVO_LEFT_ANGLE
+SERVO_CENTER_ANGLE=$SERVO_CENTER_ANGLE
+SERVO_RIGHT_ANGLE=$SERVO_RIGHT_ANGLE
+SERVO_MIN_ANGLE=$SERVO_MIN_ANGLE
+SERVO_MAX_ANGLE=$SERVO_MAX_ANGLE
+SERVO_MIN_PULSE_WIDTH=$SERVO_MIN_PULSE_WIDTH
+SERVO_MAX_PULSE_WIDTH=$SERVO_MAX_PULSE_WIDTH
+SERVO_FRAME_WIDTH=$SERVO_FRAME_WIDTH
 LIGHTS_PIN=$LIGHTS_PIN
 GPIO_ACTIVE_HIGH=$GPIO_ACTIVE_HIGH
 EOF
