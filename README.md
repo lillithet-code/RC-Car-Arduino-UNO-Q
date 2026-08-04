@@ -21,7 +21,7 @@ Remote RC car control stack with per-car session isolation, MediaMTX passthrough
    - `uno_q_board_stream_sender.py` publishes camera to MediaMTX RTSP target from server config
    - `uno_q_board_commands.py` consumes per-car command WebSocket and writes serial/RPC commands to MCU
 - Raspberry Pi 4B + Camera Module 3 helpers:
-   - `rpi4b_picam3_board_stream_sender.py` publishes Pi Camera H.264 via `libcamera-vid` to MediaMTX RTSP
+   - `rpi4b_picam3_board_stream_sender.py` publishes Pi Camera H.264 via `rpicam-vid`/`libcamera-vid` to MediaMTX RTSP
    - `rpi4b_board_commands.py` consumes per-car command WebSocket and drives GPIO motor/light pins
 - Arduino firmware:
    - Stops drivetrain if no motion command arrives for ~550 ms
@@ -81,7 +81,9 @@ python3 rpi4b_board_commands.py
 - `BOARD_TYPE`: installer selector, use `uno_q` or `rpi4b` in `install_unified.conf` / `install_unified.local.conf`
 
 Raspberry Pi 4B + Pi Camera 3 variables:
-- `PICAMERA_BITRATE`: H.264 bitrate for `libcamera-vid` (default `3500000`)
+- `FRAME_RATE`: Pi camera stream frame rate (default `60`, aligned with tether-rally profile)
+- `PICAMERA_BITRATE`: H.264 bitrate for Pi camera app (default `2000000`, aligned with tether-rally profile)
+- `LIBCAMERA_BIN`: optional override camera binary path/name; auto-detects `rpicam-vid` then `libcamera-vid`
 - `GPIO_DRY_RUN`: if `1`, logs commands without toggling GPIO
 - `DRIVE_IN1_PIN`, `DRIVE_IN2_PIN`: DRV8871 drivetrain PWM pins (defaults `18`, `19`)
 - `FORWARD_THROTTLE`, `BACK_THROTTLE`: duty cycle from `0.0` to `1.0` for forward/reverse speed

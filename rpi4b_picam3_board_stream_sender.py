@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -16,17 +17,32 @@ BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-rpi')
 BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
 STREAM_STATUS_POLL_SECONDS = max(0.3, float(os.environ.get('STREAM_STATUS_POLL_SECONDS', '1.0')))
 STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
-FRAME_RATE = float(os.environ.get('FRAME_RATE', '30'))
+FRAME_RATE = float(os.environ.get('FRAME_RATE', '60'))
 VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1280'))
 VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
-PICAMERA_BITRATE = int(os.environ.get('PICAMERA_BITRATE', '3500000'))
+PICAMERA_BITRATE = int(os.environ.get('PICAMERA_BITRATE', '2000000'))
 PUBLISH_RTSP_URL = os.environ.get('MEDIAMTX_RTSP_URL', '').strip()
-LIBCAMERA_BIN = os.environ.get('LIBCAMERA_BIN', 'libcamera-vid').strip() or 'libcamera-vid'
+LIBCAMERA_BIN = os.environ.get('LIBCAMERA_BIN', '').strip()
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip() or 'ffmpeg'
 
 STREAM_CONFIG_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/config'
 STREAM_REPORT_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/report'
 DEVICE_REGISTER_ENDPOINT = f'{SERVER_BASE_URL}/api/devices/register'
+
+
+def resolve_picamera_binary():
+    if LIBCAMERA_BIN:
+        return LIBCAMERA_BIN
+
+    for candidate in ('rpicam-vid', 'libcamera-vid'):
+        if shutil.which(candidate):
+            return candidate
+
+    # Keep an explicit default for clear runtime errors when neither binary exists.
+    return 'rpicam-vid'
+
+
+PICAMERA_BIN = resolve_picamera_binary()
 
 
 @dataclass(frozen=True)
@@ -165,7 +181,7 @@ def resolve_profile_from_config(config_payload):
 
 def build_libcamera_command(camera_mode):
     return [
-        LIBCAMERA_BIN,
+        PICAMERA_BIN,
         '--nopreview',
         '--inline',
         '--codec', 'h264',
@@ -238,7 +254,8 @@ def start_publisher(rtsp_url, camera_mode):
     ffmpeg_cmd = build_ffmpeg_publish_command(rtsp_url)
 
     print(
-        f'starting Pi Camera 3 publish mode={camera_mode.width}x{camera_mode.height}@{camera_mode.fps:g} '
+        f'starting Pi Camera 3 publish source={PICAMERA_BIN} '
+        f'mode={camera_mode.width}x{camera_mode.height}@{camera_mode.fps:g} '
         f'bitrate={PICAMERA_BITRATE} rtsp={rtsp_url}'
     )
 
