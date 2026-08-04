@@ -39,6 +39,7 @@ extract_token_from_env_file() {
 
 discover_board_token() {
   if [[ -n "${BOARD_TOKEN:-}" ]]; then
+    export BOARD_TOKEN
     return 0
   fi
 
