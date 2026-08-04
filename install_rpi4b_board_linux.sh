@@ -108,7 +108,12 @@ cd "$BOARD_DIR"
 
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update
-  sudo apt-get install -y python3 python3-pip python3-venv ffmpeg libcamera-apps python3-gpiozero pigpio python3-pigpio
+  sudo apt-get install -y python3 python3-pip python3-venv ffmpeg libcamera-apps python3-gpiozero
+  if apt-cache show pigpio >/dev/null 2>&1; then
+    sudo apt-get install -y pigpio python3-pigpio
+  else
+    echo "pigpio package not available on this distro; continuing with gpiozero default pin factory"
+  fi
 fi
 
 if command -v getent >/dev/null 2>&1 && getent group video >/dev/null 2>&1; then
