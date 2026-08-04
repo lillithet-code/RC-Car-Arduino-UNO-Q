@@ -54,6 +54,7 @@ class CarGPIODriver:
         self._devices = {}
         self._pwm_capable = {}
         self._servo = None
+        self._warned_servo_unavailable = False
 
         if self.dry_run:
             print('GPIO dry-run enabled; commands will be logged only')
@@ -67,15 +68,22 @@ class CarGPIODriver:
             'drive_in2': self._build_drive_output('drive_in2', DRIVE_IN2_PIN),
             'lights': DigitalOutputDevice(LIGHTS_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
         }
-        self._servo = AngularServo(
-            SERVO_PIN,
-            min_angle=SERVO_MIN_ANGLE,
-            max_angle=SERVO_MAX_ANGLE,
-            min_pulse_width=SERVO_MIN_PULSE_WIDTH,
-            max_pulse_width=SERVO_MAX_PULSE_WIDTH,
-            frame_width=SERVO_FRAME_WIDTH,
-        )
-        self._servo.angle = SERVO_CENTER_ANGLE
+        try:
+            self._servo = AngularServo(
+                SERVO_PIN,
+                min_angle=SERVO_MIN_ANGLE,
+                max_angle=SERVO_MAX_ANGLE,
+                min_pulse_width=SERVO_MIN_PULSE_WIDTH,
+                max_pulse_width=SERVO_MAX_PULSE_WIDTH,
+                frame_width=SERVO_FRAME_WIDTH,
+            )
+            self._servo.angle = SERVO_CENTER_ANGLE
+        except PinPWMUnsupported:
+            self._servo = None
+            print(
+                f'warning: PWM not supported on GPIO{SERVO_PIN} for servo steering; '
+                'continuing without servo output. Install a PWM-capable pin factory (lgpio/pigpio) or adjust SERVO_PIN.'
+            )
 
     def _build_drive_output(self, name, pin):
         try:
@@ -108,6 +116,9 @@ class CarGPIODriver:
 
     def _set_steering(self, angle):
         if self._servo is None:
+            if not self._warned_servo_unavailable:
+                print('warning: steering command ignored because servo output is unavailable')
+                self._warned_servo_unavailable = True
             return
         clamped = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, float(angle)))
         self._servo.angle = clamped

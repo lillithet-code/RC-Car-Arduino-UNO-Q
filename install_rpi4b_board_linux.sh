@@ -67,6 +67,7 @@ SERVO_MAX_PULSE_WIDTH="$(resolve_config_value SERVO_MAX_PULSE_WIDTH 0.0025)"
 SERVO_FRAME_WIDTH="$(resolve_config_value SERVO_FRAME_WIDTH 0.02)"
 LIGHTS_PIN="$(resolve_config_value LIGHTS_PIN 24)"
 GPIO_ACTIVE_HIGH="$(resolve_config_value GPIO_ACTIVE_HIGH 1)"
+GPIOZERO_PIN_FACTORY="$(resolve_config_value GPIOZERO_PIN_FACTORY lgpio)"
 BOARD_RUN_USER="${BOARD_RUN_USER:-}"
 
 if [[ -z "$BOARD_RUN_USER" && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
@@ -124,6 +125,13 @@ if command -v apt-get >/dev/null 2>&1; then
   else
     echo "python3-pigpio package not available on this distro; continuing without pigpio Python bindings"
   fi
+
+  PYTHON3_LGPIO_CANDIDATE="$(apt-cache policy python3-lgpio 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+  if [[ -n "$PYTHON3_LGPIO_CANDIDATE" && "$PYTHON3_LGPIO_CANDIDATE" != "(none)" ]]; then
+    sudo apt-get install -y python3-lgpio
+  else
+    echo "python3-lgpio package not available on this distro; gpiozero will use fallback pin factories"
+  fi
 fi
 
 if command -v getent >/dev/null 2>&1 && getent group video >/dev/null 2>&1; then
@@ -174,6 +182,7 @@ SERVO_MAX_PULSE_WIDTH=$SERVO_MAX_PULSE_WIDTH
 SERVO_FRAME_WIDTH=$SERVO_FRAME_WIDTH
 LIGHTS_PIN=$LIGHTS_PIN
 GPIO_ACTIVE_HIGH=$GPIO_ACTIVE_HIGH
+GPIOZERO_PIN_FACTORY=$GPIOZERO_PIN_FACTORY
 EOF
 sudo chown "$BOARD_RUN_USER":"$BOARD_RUN_USER" "$BOARD_DIR/.env"
 sudo chmod 600 "$BOARD_DIR/.env"

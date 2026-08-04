@@ -93,6 +93,7 @@ Raspberry Pi 4B + Pi Camera 3 variables:
 - `SERVO_MIN_PULSE_WIDTH`, `SERVO_MAX_PULSE_WIDTH`, `SERVO_FRAME_WIDTH`: servo pulse timing calibration
 - `LIGHTS_PIN`: lights control pin (default `24`)
 - `GPIO_ACTIVE_HIGH`: set `0` for active-low relay/driver boards
+- `GPIOZERO_PIN_FACTORY`: preferred gpiozero backend (`lgpio` recommended on recent Raspberry Pi OS)
 
 Raspberry Pi PWM note:
 - For true PWM throttle with gpiozero, use PWM-capable GPIO pins (`12`, `13`, `18`, `19`).
