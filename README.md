@@ -83,7 +83,7 @@ python3 rpi4b_board_commands.py
 Raspberry Pi 4B + Pi Camera 3 variables:
 - `PICAMERA_BITRATE`: H.264 bitrate for `libcamera-vid` (default `3500000`)
 - `GPIO_DRY_RUN`: if `1`, logs commands without toggling GPIO
-- `DRIVE_IN1_PIN`, `DRIVE_IN2_PIN`: DRV8871 drivetrain PWM pins (defaults `17`, `27`)
+- `DRIVE_IN1_PIN`, `DRIVE_IN2_PIN`: DRV8871 drivetrain PWM pins (defaults `18`, `19`)
 - `FORWARD_THROTTLE`, `BACK_THROTTLE`: duty cycle from `0.0` to `1.0` for forward/reverse speed
 - `SERVO_PIN`: PWM pin used for steering servo signal (default `12`)
 - `SERVO_LEFT_ANGLE`, `SERVO_CENTER_ANGLE`, `SERVO_RIGHT_ANGLE`: steering command target angles
@@ -91,6 +91,10 @@ Raspberry Pi 4B + Pi Camera 3 variables:
 - `SERVO_MIN_PULSE_WIDTH`, `SERVO_MAX_PULSE_WIDTH`, `SERVO_FRAME_WIDTH`: servo pulse timing calibration
 - `LIGHTS_PIN`: lights control pin (default `24`)
 - `GPIO_ACTIVE_HIGH`: set `0` for active-low relay/driver boards
+
+Raspberry Pi PWM note:
+- For true PWM throttle with gpiozero, use PWM-capable GPIO pins (`12`, `13`, `18`, `19`).
+- If a non-PWM pin is configured, the runtime falls back to digital on/off throttle for that channel.
 
 ## Server-side variables
 - `BOARD_TOKEN`: shared board token

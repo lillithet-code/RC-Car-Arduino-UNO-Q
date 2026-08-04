@@ -14,6 +14,11 @@ except Exception:  # pragma: no cover - runtime environment dependent
     PWMOutputDevice = None
 
 try:
+    from gpiozero.exc import PinPWMUnsupported
+except Exception:  # pragma: no cover - runtime environment dependent
+    PinPWMUnsupported = Exception
+
+try:
     from websocket import create_connection
 except ImportError:  # pragma: no cover - exercised when websocket-client is missing
     create_connection = None
@@ -47,6 +52,7 @@ class CarGPIODriver:
     def __init__(self, dry_run=False):
         self.dry_run = dry_run
         self._devices = {}
+        self._pwm_capable = {}
         self._servo = None
 
         if self.dry_run:
@@ -57,8 +63,8 @@ class CarGPIODriver:
             raise RuntimeError('gpiozero is required on Raspberry Pi (or set GPIO_DRY_RUN=1 for testing)')
 
         self._devices = {
-            'drive_in1': PWMOutputDevice(DRIVE_IN1_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=0.0, frequency=1000),
-            'drive_in2': PWMOutputDevice(DRIVE_IN2_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=0.0, frequency=1000),
+            'drive_in1': self._build_drive_output('drive_in1', DRIVE_IN1_PIN),
+            'drive_in2': self._build_drive_output('drive_in2', DRIVE_IN2_PIN),
             'lights': DigitalOutputDevice(LIGHTS_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
         }
         self._servo = AngularServo(
@@ -71,14 +77,27 @@ class CarGPIODriver:
         )
         self._servo.angle = SERVO_CENTER_ANGLE
 
+    def _build_drive_output(self, name, pin):
+        try:
+            device = PWMOutputDevice(pin, active_high=GPIO_ACTIVE_HIGH, initial_value=0.0, frequency=1000)
+            self._pwm_capable[name] = True
+            return device
+        except PinPWMUnsupported:
+            print(
+                f'warning: PWM not supported on GPIO{pin}; falling back to digital on/off for {name}. '
+                'Use GPIO12/13/18/19 for true hardware PWM throttle.'
+            )
+            self._pwm_capable[name] = False
+            return DigitalOutputDevice(pin, active_high=GPIO_ACTIVE_HIGH, initial_value=False)
+
     def _set(self, name, value):
         device = self._devices.get(name)
         if device is None:
             return
-        if isinstance(device, PWMOutputDevice):
+        if self._pwm_capable.get(name):
             device.value = max(0.0, min(1.0, float(value)))
             return
-        if value:
+        if float(value) >= 0.5:
             device.on()
             return
         device.off()
