@@ -73,6 +73,7 @@ export_install_defaults() {
   export BOARD_DIR="${BOARD_DIR:-/home/arduino/rc-car-arduino-uno-q}"
   export LEGACY_BOARD_DIR="${LEGACY_BOARD_DIR:-/home/arduino/RC-Car-Arduino-UNO-Q}"
   export BOARD_NAME="${BOARD_NAME:-RCCar1}"
+  export BOARD_TYPE="${BOARD_TYPE:-uno_q}"
 }
 
 run_git_pull() {
@@ -117,15 +118,34 @@ install_board() {
     echo "Copy the BOARD_TOKEN from the server .env into install_unified.local.conf." >&2
     exit 1
   fi
-  ./install_uno_q_board_linux.sh
+  local selected_board_type
+  selected_board_type="$(printf '%s' "${BOARD_TYPE:-uno_q}" | tr '[:upper:]' '[:lower:]')"
 
-  echo "Restarting board service"
-  sudo systemctl restart rc-car-board
-
-  echo "Board install complete"
-  echo "Verify with:"
-  echo "  sudo systemctl --no-pager --full status rc-car-board"
-  echo "  sudo journalctl -u rc-car-board -n 120 --no-pager"
+  case "$selected_board_type" in
+    uno_q|arduino_uno_q|unoq)
+      ./install_uno_q_board_linux.sh
+      echo "Restarting board service"
+      sudo systemctl restart rc-car-board
+      echo "Board install complete"
+      echo "Verify with:"
+      echo "  sudo systemctl --no-pager --full status rc-car-board"
+      echo "  sudo journalctl -u rc-car-board -n 120 --no-pager"
+      ;;
+    rpi4b|raspberry_pi_4b|raspberry_pi_4b_picam3|picam3)
+      ./install_rpi4b_board_linux.sh
+      echo "Restarting board service"
+      sudo systemctl restart rc-car-rpi4b-board
+      echo "Board install complete"
+      echo "Verify with:"
+      echo "  sudo systemctl --no-pager --full status rc-car-rpi4b-board"
+      echo "  sudo journalctl -u rc-car-rpi4b-board -n 120 --no-pager"
+      ;;
+    *)
+      echo "Error: unsupported BOARD_TYPE=$BOARD_TYPE" >&2
+      echo "Supported BOARD_TYPE values: uno_q, rpi4b" >&2
+      exit 1
+      ;;
+  esac
 }
 
 load_config

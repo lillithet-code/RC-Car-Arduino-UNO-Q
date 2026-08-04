@@ -20,6 +20,9 @@ Remote RC car control stack with per-car session isolation, MediaMTX passthrough
 - Board Linux helpers:
    - `uno_q_board_stream_sender.py` publishes camera to MediaMTX RTSP target from server config
    - `uno_q_board_commands.py` consumes per-car command WebSocket and writes serial/RPC commands to MCU
+- Raspberry Pi 4B + Camera Module 3 helpers:
+   - `rpi4b_picam3_board_stream_sender.py` publishes Pi Camera H.264 via `libcamera-vid` to MediaMTX RTSP
+   - `rpi4b_board_commands.py` consumes per-car command WebSocket and drives GPIO motor/light pins
 - Arduino firmware:
    - Stops drivetrain if no motion command arrives for ~550 ms
 
@@ -56,8 +59,13 @@ through the provider and host firewalls for WebRTC media.
 
 5. On board Linux side, run helpers:
 ```bash
+# UNO Q board helpers
 python3 uno_q_board_stream_sender.py
 python3 uno_q_board_commands.py
+
+# Raspberry Pi 4B board helpers
+python3 rpi4b_picam3_board_stream_sender.py
+python3 rpi4b_board_commands.py
 ```
 
 ## Board-side variables
@@ -70,6 +78,15 @@ python3 uno_q_board_commands.py
 - `H264_ENCODER`: defaults to `libx264`; set an available encoder explicitly if the board supports low-latency hardware encode reliably
 - `COMMAND_WS_URL`: optional explicit command WS URL
 - `MEDIAMTX_RTSP_URL`: optional fixed override target (if not using server-provided URL)
+- `BOARD_TYPE`: installer selector, use `uno_q` or `rpi4b` in `install_unified.conf` / `install_unified.local.conf`
+
+Raspberry Pi 4B + Pi Camera 3 variables:
+- `PICAMERA_BITRATE`: H.264 bitrate for `libcamera-vid` (default `3500000`)
+- `GPIO_DRY_RUN`: if `1`, logs commands without toggling GPIO
+- `DRIVE_IN1_PIN`, `DRIVE_IN2_PIN`: drivetrain H-bridge direction pins (defaults `17`, `27`)
+- `STEER_IN1_PIN`, `STEER_IN2_PIN`: steering H-bridge direction pins (defaults `22`, `23`)
+- `LIGHTS_PIN`: lights control pin (default `24`)
+- `GPIO_ACTIVE_HIGH`: set `0` for active-low relay/driver boards
 
 ## Server-side variables
 - `BOARD_TOKEN`: shared board token
@@ -110,6 +127,18 @@ Server app install:
 Board install:
 ```bash
 ./install_uno_q_board_linux.sh
+
+# Raspberry Pi 4B board install
+./install_rpi4b_board_linux.sh
+```
+
+Unified board install by type:
+```bash
+# UNO Q board
+BOARD_TYPE=uno_q MODE=board ./install_unified.sh
+
+# Raspberry Pi 4B + Camera Module 3 board
+BOARD_TYPE=rpi4b MODE=board ./install_unified.sh
 ```
 
 MediaMTX config template is included in `mediamtx.yml`.

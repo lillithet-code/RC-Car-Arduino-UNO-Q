@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOARD_DIR="${BOARD_DIR:-$HOME/rc-car-rpi4b-board}"
+VENV_DIR="${VENV_DIR:-$BOARD_DIR/.venv}"
+SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+
+if [[ -f "$SCRIPT_DIR/uno_q_board_install_helpers.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/uno_q_board_install_helpers.sh"
+fi
+
+read_existing_env_value() {
+  local key="$1"
+  local env_file="$BOARD_DIR/.env"
+  [[ -f "$env_file" ]] || return 1
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$env_file"
+}
+
+resolve_config_value() {
+  local key="$1"
+  local default_value="$2"
+  local supplied_value="${!key:-}"
+  if [[ -n "$supplied_value" ]]; then
+    printf '%s' "$supplied_value"
+    return
+  fi
+  local existing_value
+  existing_value="$(read_existing_env_value "$key" 2>/dev/null || true)"
+  printf '%s' "${existing_value:-$default_value}"
+}
+
+discover_board_token() {
+  if select_board_token; then
+    return 0
+  fi
+  return 1
+}
+
+SERVER_URL="$(resolve_config_value SERVER_URL https://drive.kbob.org)"
+SERVER_URL="${SERVER_URL%/}"
+BOARD_TOKEN="$(resolve_config_value BOARD_TOKEN '')"
+BOARD_NAME="$(resolve_config_value BOARD_NAME "$(hostname)")"
+BOARD_LOCATION="$(resolve_config_value BOARD_LOCATION unknown)"
+COMMAND_WS_URL="$(resolve_config_value COMMAND_WS_URL '')"
+COMMAND_WS_RETRY_SECONDS="$(resolve_config_value COMMAND_WS_RETRY_SECONDS 1.0)"
+STREAM_STATUS_POLL_SECONDS="$(resolve_config_value STREAM_STATUS_POLL_SECONDS 1.0)"
+STREAM_DISABLE_GRACE_SECONDS="$(resolve_config_value STREAM_DISABLE_GRACE_SECONDS 8.0)"
+FRAME_RATE="$(resolve_config_value FRAME_RATE 30)"
+VIDEO_WIDTH="$(resolve_config_value VIDEO_WIDTH 1280)"
+VIDEO_HEIGHT="$(resolve_config_value VIDEO_HEIGHT 720)"
+PICAMERA_BITRATE="$(resolve_config_value PICAMERA_BITRATE 3500000)"
+MEDIAMTX_RTSP_URL="$(resolve_config_value MEDIAMTX_RTSP_URL '')"
+GPIO_DRY_RUN="$(resolve_config_value GPIO_DRY_RUN 0)"
+DRIVE_IN1_PIN="$(resolve_config_value DRIVE_IN1_PIN 17)"
+DRIVE_IN2_PIN="$(resolve_config_value DRIVE_IN2_PIN 27)"
+STEER_IN1_PIN="$(resolve_config_value STEER_IN1_PIN 22)"
+STEER_IN2_PIN="$(resolve_config_value STEER_IN2_PIN 23)"
+LIGHTS_PIN="$(resolve_config_value LIGHTS_PIN 24)"
+GPIO_ACTIVE_HIGH="$(resolve_config_value GPIO_ACTIVE_HIGH 1)"
+BOARD_RUN_USER="${BOARD_RUN_USER:-}"
+
+if [[ -z "$BOARD_RUN_USER" && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  BOARD_RUN_USER="$SUDO_USER"
+fi
+BOARD_RUN_USER="${BOARD_RUN_USER:-$(id -un)}"
+if ! id "$BOARD_RUN_USER" >/dev/null 2>&1; then
+  echo "Error: BOARD_RUN_USER does not exist: $BOARD_RUN_USER" >&2
+  exit 1
+fi
+
+if [[ -z "$BOARD_TOKEN" || "$BOARD_TOKEN" == "dev-board-token" ]]; then
+  if ! discover_board_token; then
+    echo "Error: BOARD_TOKEN must be set to the same non-default token used by the server." >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$BOARD_DIR"
+
+sync_runtime_files() {
+  local source_dir="${SCRIPT_DIR:-$PWD}"
+  local target_dir="$BOARD_DIR"
+
+  mkdir -p "$target_dir"
+  for relative_path in rpi4b_picam3_board_stream_sender.py rpi4b_board_commands.py requirements_rpi4b_board.txt; do
+    local source_file="$source_dir/$relative_path"
+    local target_file="$target_dir/$relative_path"
+    if [[ -f "$source_file" ]]; then
+      if [[ "$source_file" != "$target_file" ]]; then
+        cp "$source_file" "$target_file"
+      fi
+    fi
+  done
+}
+
+sync_runtime_files
+cd "$BOARD_DIR"
+
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y python3 python3-pip python3-venv ffmpeg libcamera-apps python3-gpiozero
+fi
+
+if command -v getent >/dev/null 2>&1 && getent group video >/dev/null 2>&1; then
+  if ! id -nG "$BOARD_RUN_USER" | tr ' ' '\n' | grep -qx 'video'; then
+    echo "Adding $BOARD_RUN_USER to video group for camera device access"
+    sudo usermod -aG video "$BOARD_RUN_USER"
+  fi
+fi
+
+if command -v getent >/dev/null 2>&1 && getent group gpio >/dev/null 2>&1; then
+  if ! id -nG "$BOARD_RUN_USER" | tr ' ' '\n' | grep -qx 'gpio'; then
+    echo "Adding $BOARD_RUN_USER to gpio group for motor control pins"
+    sudo usermod -aG gpio "$BOARD_RUN_USER"
+  fi
+fi
+
+python3 -m venv "$VENV_DIR"
+"$VENV_DIR/bin/python3" -m pip install --upgrade pip
+"$VENV_DIR/bin/python3" -m pip install -r "$BOARD_DIR/requirements_rpi4b_board.txt"
+
+cat > "$BOARD_DIR/.env" <<EOF
+SERVER_URL=$SERVER_URL
+BOARD_TOKEN=$BOARD_TOKEN
+BOARD_NAME=$BOARD_NAME
+BOARD_LOCATION=$BOARD_LOCATION
+COMMAND_WS_URL=$COMMAND_WS_URL
+COMMAND_WS_RETRY_SECONDS=$COMMAND_WS_RETRY_SECONDS
+STREAM_STATUS_POLL_SECONDS=$STREAM_STATUS_POLL_SECONDS
+STREAM_DISABLE_GRACE_SECONDS=$STREAM_DISABLE_GRACE_SECONDS
+FRAME_RATE=$FRAME_RATE
+VIDEO_WIDTH=$VIDEO_WIDTH
+VIDEO_HEIGHT=$VIDEO_HEIGHT
+PICAMERA_BITRATE=$PICAMERA_BITRATE
+MEDIAMTX_RTSP_URL=$MEDIAMTX_RTSP_URL
+GPIO_DRY_RUN=$GPIO_DRY_RUN
+DRIVE_IN1_PIN=$DRIVE_IN1_PIN
+DRIVE_IN2_PIN=$DRIVE_IN2_PIN
+STEER_IN1_PIN=$STEER_IN1_PIN
+STEER_IN2_PIN=$STEER_IN2_PIN
+LIGHTS_PIN=$LIGHTS_PIN
+GPIO_ACTIVE_HIGH=$GPIO_ACTIVE_HIGH
+EOF
+sudo chown "$BOARD_RUN_USER":"$BOARD_RUN_USER" "$BOARD_DIR/.env"
+sudo chmod 600 "$BOARD_DIR/.env"
+
+cat > "$BOARD_DIR/start_rpi4b_board.sh" <<'EOF2'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -f "$DIR/.venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$DIR/.venv/bin/activate"
+fi
+set -a
+if [[ -f "$DIR/.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$DIR/.env"
+fi
+set +a
+export PYTHONUNBUFFERED=1
+python3 -u "$DIR/rpi4b_picam3_board_stream_sender.py" &
+STREAM_PID=$!
+python3 -u "$DIR/rpi4b_board_commands.py" &
+COMMAND_PID=$!
+
+shutdown_children() {
+  kill "$STREAM_PID" "$COMMAND_PID" 2>/dev/null || true
+  wait "$STREAM_PID" "$COMMAND_PID" 2>/dev/null || true
+}
+
+handle_termination() {
+  shutdown_children
+  trap - EXIT
+  exit 0
+}
+
+trap shutdown_children EXIT
+trap handle_termination INT TERM
+
+set +e
+wait -n "$STREAM_PID" "$COMMAND_PID"
+CHILD_STATUS=$?
+set -e
+echo "A Raspberry Pi board child process exited (status=$CHILD_STATUS); stopping sibling so systemd can restart both." >&2
+if [[ "$CHILD_STATUS" -eq 0 ]]; then
+  exit 1
+fi
+exit "$CHILD_STATUS"
+EOF2
+
+chmod +x "$BOARD_DIR/start_rpi4b_board.sh"
+
+cat > "$BOARD_DIR/rc-car-rpi4b-board.service" <<EOF3
+[Unit]
+Description=RC Car Raspberry Pi 4B board stream and command service
+After=network.target
+
+[Service]
+WorkingDirectory=$BOARD_DIR
+EnvironmentFile=$BOARD_DIR/.env
+ExecStart=$BOARD_DIR/start_rpi4b_board.sh
+Restart=always
+RestartSec=5
+User=$BOARD_RUN_USER
+
+[Install]
+WantedBy=multi-user.target
+EOF3
+
+sudo mv "$BOARD_DIR/rc-car-rpi4b-board.service" /etc/systemd/system/rc-car-rpi4b-board.service
+sudo systemctl daemon-reload
+sudo systemctl enable rc-car-rpi4b-board.service
+if command -v systemctl >/dev/null 2>&1; then
+  sudo systemctl restart rc-car-rpi4b-board.service >/dev/null 2>&1 || true
+fi
+
+cat <<EOF
+Raspberry Pi 4B board install completed.
+
+Next steps:
+1. Start the service: sudo systemctl start rc-car-rpi4b-board
+2. Check logs: sudo journalctl -u rc-car-rpi4b-board -f
+3. If groups were changed, log out/in once so new video/gpio membership applies.
+EOF
