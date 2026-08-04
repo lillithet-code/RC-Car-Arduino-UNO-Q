@@ -65,16 +65,36 @@ discover_board_token() {
 }
 
 export_install_defaults() {
+  local selected_board_type
+  selected_board_type="$(printf '%s' "${BOARD_TYPE:-uno_q}" | tr '[:upper:]' '[:lower:]')"
+
   export PLESK_DOMAIN="${PLESK_DOMAIN:-drive.kbob.org}"
   export MEDIAMTX_WHEP_BASE="${MEDIAMTX_WHEP_BASE:-https://drive.kbob.org}"
   export MEDIAMTX_RTSP_BASE="${MEDIAMTX_RTSP_BASE:-rtsp://drive.kbob.org:8554}"
   export MEDIAMTX_WEBRTC_ADDITIONAL_HOST="${MEDIAMTX_WEBRTC_ADDITIONAL_HOST:-drive.kbob.org}"
   export SERVER_URL="${SERVER_URL:-https://drive.kbob.org}"
   export SERVER_APP_DIR="${SERVER_APP_DIR:-/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q}"
-  export BOARD_DIR="${BOARD_DIR:-/home/arduino/rc-car-arduino-uno-q}"
+  export BOARD_TYPE="${BOARD_TYPE:-uno_q}"
+
+  if [[ -z "${BOARD_DIR:-}" ]]; then
+    case "$selected_board_type" in
+      rpi4b|raspberry_pi_4b|raspberry_pi_4b_picam3|picam3)
+        export BOARD_DIR="/home/$(id -un)/rc-car-rpi4b-board"
+        ;;
+      *)
+        export BOARD_DIR="/home/arduino/rc-car-arduino-uno-q"
+        ;;
+    esac
+  else
+    export BOARD_DIR
+  fi
+
+  if [[ "$selected_board_type" =~ ^(rpi4b|raspberry_pi_4b|raspberry_pi_4b_picam3|picam3)$ && -z "${BOARD_RUN_USER:-}" ]]; then
+    export BOARD_RUN_USER="$(id -un)"
+  fi
+
   export LEGACY_BOARD_DIR="${LEGACY_BOARD_DIR:-/home/arduino/RC-Car-Arduino-UNO-Q}"
   export BOARD_NAME="${BOARD_NAME:-RCCar1}"
-  export BOARD_TYPE="${BOARD_TYPE:-uno_q}"
 }
 
 run_git_pull() {

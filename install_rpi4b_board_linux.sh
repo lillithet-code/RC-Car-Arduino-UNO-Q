@@ -249,6 +249,34 @@ if command -v systemctl >/dev/null 2>&1; then
   sudo systemctl restart rc-car-rpi4b-board.service >/dev/null 2>&1 || true
 fi
 
+if command -v curl >/dev/null 2>&1; then
+  BOARD_NAME_ENCODED="$(python3 - "$BOARD_NAME" <<'PY'
+import sys
+from urllib.parse import quote
+
+print(quote(sys.argv[1], safe=''))
+PY
+)"
+  STATUS_URL="$SERVER_URL/api/board/stream/status?board_name=$BOARD_NAME_ENCODED"
+  TOKEN_CHECK_BODY="$(mktemp)"
+  TOKEN_CHECK_CODE="$(curl -sS -o "$TOKEN_CHECK_BODY" -w '%{http_code}' -H "Authorization: Bearer $BOARD_TOKEN" --max-time 5 "$STATUS_URL" || true)"
+
+  if [[ "$TOKEN_CHECK_CODE" == "403" ]]; then
+    echo ""
+    echo "Warning: board auth check returned HTTP 403 (token mismatch likely)."
+    echo "Run this on the server to sync BOARD_TOKEN with this board token:"
+    echo "  sudo sed -i 's|^BOARD_TOKEN=.*|BOARD_TOKEN=$BOARD_TOKEN|' ${SERVER_APP_DIR:-/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q}/.env"
+    echo "  sudo systemctl restart rc-car-web"
+  elif [[ "$TOKEN_CHECK_CODE" =~ ^2 ]]; then
+    echo "Board auth check passed: $STATUS_URL"
+  else
+    echo "Board auth check returned HTTP $TOKEN_CHECK_CODE; response body follows:"
+    cat "$TOKEN_CHECK_BODY" || true
+  fi
+
+  rm -f "$TOKEN_CHECK_BODY"
+fi
+
 cat <<EOF
 Raspberry Pi 4B board install completed.
 
