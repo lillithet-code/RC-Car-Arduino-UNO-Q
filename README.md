@@ -85,6 +85,8 @@ Raspberry Pi 4B + Pi Camera 3 variables:
 - `PICAMERA_BITRATE`: H.264 bitrate for Pi camera app (default `2000000`, aligned with tether-rally profile)
 - `PICAMERA_PROFILE`: optional H.264 profile passed to Pi camera app (default `baseline`)
 - `PICAMERA_LEVEL`: optional H.264 level passed to Pi camera app (default empty; set only if your Pi camera build supports it)
+- `PICAMERA_SENSOR`: optional sensor hint for auto camera selection (for example `imx219` or `imx708`; default `auto`)
+- `PICAMERA_CAMERA_INDEX`: optional explicit camera index from `rpicam-vid --list-cameras` (default `auto`)
 - `LIBCAMERA_BIN`: optional override camera binary path/name; auto-detects `rpicam-vid` then `libcamera-vid`
 - `GPIO_DRY_RUN`: if `1`, logs commands without toggling GPIO
 - `DRIVE_IN1_PIN`, `DRIVE_IN2_PIN`: DRV8871 drivetrain PWM pins (defaults `18`, `19`)
@@ -100,6 +102,10 @@ Raspberry Pi 4B + Pi Camera 3 variables:
 Raspberry Pi PWM note:
 - For true PWM throttle with gpiozero, use PWM-capable GPIO pins (`12`, `13`, `18`, `19`).
 - If a non-PWM pin is configured, the runtime falls back to digital on/off throttle for that channel.
+
+Switching between Camera Module 3 (IMX708) and IMX219:
+- Set `PICAMERA_SENSOR=imx708` for Camera Module 3 or `PICAMERA_SENSOR=imx219` for IMX219 and restart service.
+- If multiple cameras are attached, set `PICAMERA_CAMERA_INDEX` directly (for example `0` or `1`) for deterministic selection.
 
 ## Server-side variables
 - `BOARD_TOKEN`: shared board token

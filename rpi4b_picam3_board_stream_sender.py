@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -23,6 +24,8 @@ VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
 PICAMERA_BITRATE = int(os.environ.get('PICAMERA_BITRATE', '2000000'))
 PICAMERA_PROFILE = (os.environ.get('PICAMERA_PROFILE', 'baseline') or '').strip()
 PICAMERA_LEVEL = (os.environ.get('PICAMERA_LEVEL', '') or '').strip()
+PICAMERA_SENSOR = (os.environ.get('PICAMERA_SENSOR', 'auto') or 'auto').strip().lower()
+PICAMERA_CAMERA_INDEX = (os.environ.get('PICAMERA_CAMERA_INDEX', 'auto') or 'auto').strip().lower()
 PUBLISH_RTSP_URL = os.environ.get('MEDIAMTX_RTSP_URL', '').strip()
 LIBCAMERA_BIN = os.environ.get('LIBCAMERA_BIN', '').strip()
 FFMPEG_BIN = os.environ.get('FFMPEG_BIN', 'ffmpeg').strip() or 'ffmpeg'
@@ -45,6 +48,55 @@ def resolve_picamera_binary():
 
 
 PICAMERA_BIN = resolve_picamera_binary()
+
+
+def parse_camera_index(raw_value):
+    value = (raw_value or '').strip().lower()
+    if value in {'', 'auto'}:
+        return None
+    try:
+        index = int(value)
+        return index if index >= 0 else None
+    except ValueError:
+        return None
+
+
+def discover_camera_index_for_sensor(sensor_hint):
+    sensor = (sensor_hint or '').strip().lower()
+    if sensor in {'', 'auto'}:
+        return None
+
+    try:
+        result = subprocess.run(
+            [PICAMERA_BIN, '--list-cameras'],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        print(f'camera list query failed: {exc}', file=sys.stderr)
+        return None
+
+    output = '\n'.join(part for part in ((result.stdout or ''), (result.stderr or '')) if part)
+    for line in output.splitlines():
+        match = re.search(r'^\s*(\d+)\s*:\s*(.+)$', line)
+        if not match:
+            continue
+        index = int(match.group(1))
+        description = match.group(2).strip().lower()
+        if sensor in description:
+            return index
+
+    print(f'camera sensor hint not found in list-cameras output: {sensor_hint}', file=sys.stderr)
+    return None
+
+
+def resolve_camera_index():
+    explicit_index = parse_camera_index(PICAMERA_CAMERA_INDEX)
+    if explicit_index is not None:
+        return explicit_index
+    return discover_camera_index_for_sensor(PICAMERA_SENSOR)
 
 
 @dataclass(frozen=True)
@@ -182,6 +234,7 @@ def resolve_profile_from_config(config_payload):
 
 
 def build_libcamera_command(camera_mode):
+    camera_index = resolve_camera_index()
     command = [
         PICAMERA_BIN,
         '--nopreview',
@@ -194,6 +247,9 @@ def build_libcamera_command(camera_mode):
         '--timeout', '0',
         '--output', '-',
     ]
+
+    if camera_index is not None:
+        command.extend(['--camera', str(camera_index)])
 
     if PICAMERA_PROFILE:
         command.extend(['--profile', PICAMERA_PROFILE])
@@ -260,11 +316,16 @@ def stop_publisher(publisher, reason):
 def start_publisher(rtsp_url, camera_mode):
     libcamera_cmd = build_libcamera_command(camera_mode)
     ffmpeg_cmd = build_ffmpeg_publish_command(rtsp_url)
+    selected_camera_index = None
+    if '--camera' in libcamera_cmd:
+        selected_camera_index = libcamera_cmd[libcamera_cmd.index('--camera') + 1]
 
     print(
         f'starting Pi Camera 3 publish source={PICAMERA_BIN} '
         f'mode={camera_mode.width}x{camera_mode.height}@{camera_mode.fps:g} '
-        f'bitrate={PICAMERA_BITRATE} rtsp={rtsp_url}'
+        f'bitrate={PICAMERA_BITRATE} rtsp={rtsp_url} '
+        f'camera_selector={PICAMERA_CAMERA_INDEX} sensor_hint={PICAMERA_SENSOR} '
+        f'camera_index={selected_camera_index if selected_camera_index is not None else "auto"}'
     )
 
     libcamera = subprocess.Popen(
