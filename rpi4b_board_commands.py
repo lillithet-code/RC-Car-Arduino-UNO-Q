@@ -1,10 +1,29 @@
 #!/usr/bin/env python3
+import importlib.util
 import json
 import os
 import socket
 import time
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+
+
+def normalize_gpiozero_pin_factory(env=None):
+    source = os.environ if env is None else env
+    raw_value = (source.get('GPIOZERO_PIN_FACTORY') or '').strip().lower()
+    if raw_value != 'lgpio':
+        return raw_value
+
+    if importlib.util.find_spec('lgpio') is not None:
+        return raw_value
+
+    fallback = 'native'
+    source['GPIOZERO_PIN_FACTORY'] = fallback
+    print('warning: GPIOZERO_PIN_FACTORY=lgpio but lgpio is unavailable; falling back to native pin factory')
+    return fallback
+
+
+normalize_gpiozero_pin_factory()
 
 try:
     from gpiozero import AngularServo, DigitalOutputDevice, PWMOutputDevice

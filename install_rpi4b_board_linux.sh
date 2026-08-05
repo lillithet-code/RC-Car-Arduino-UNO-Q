@@ -177,15 +177,15 @@ if command -v getent >/dev/null 2>&1 && getent group gpio >/dev/null 2>&1; then
   fi
 fi
 
-python3 -m venv "$VENV_DIR"
+python3 -m venv --clear --system-site-packages "$VENV_DIR"
 "$VENV_DIR/bin/python3" -m pip install --upgrade pip
 "$VENV_DIR/bin/python3" -m pip install -r "$BOARD_DIR/requirements_rpi4b_board.txt"
 
 if [[ "$GPIOZERO_PIN_FACTORY" == "lgpio" ]]; then
   if ! "$VENV_DIR/bin/python3" -c 'import lgpio' >/dev/null 2>&1; then
-    echo "Error: GPIOZERO_PIN_FACTORY=lgpio but the Python lgpio module is unavailable in $VENV_DIR." >&2
-    echo "Install the board requirements again or set GPIOZERO_PIN_FACTORY to a working backend before starting the service." >&2
-    exit 1
+    echo "Warning: GPIOZERO_PIN_FACTORY=lgpio but the Python lgpio module is unavailable in $VENV_DIR." >&2
+    echo "Falling back to GPIOZERO_PIN_FACTORY=native for this install." >&2
+    GPIOZERO_PIN_FACTORY=native
   fi
 fi
 
