@@ -156,17 +156,13 @@ def resolve_requested_camera_mode(env=None):
     source = os.environ if env is None else env
     sensor_hint = (source.get('PICAMERA_SENSOR', PICAMERA_SENSOR) or '').strip().lower()
     if sensor_hint == 'imx219':
-        default_width = IMX219_VIDEO_WIDTH
-        default_height = IMX219_VIDEO_HEIGHT
-        default_fps = IMX219_FRAME_RATE
+        width = int(source.get('PICAMERA_IMX219_VIDEO_WIDTH', str(IMX219_VIDEO_WIDTH)))
+        height = int(source.get('PICAMERA_IMX219_VIDEO_HEIGHT', str(IMX219_VIDEO_HEIGHT)))
+        fps = float(source.get('PICAMERA_IMX219_FRAME_RATE', str(IMX219_FRAME_RATE)))
     else:
-        default_width = VIDEO_WIDTH
-        default_height = VIDEO_HEIGHT
-        default_fps = FRAME_RATE
-
-    width = int(source.get('VIDEO_WIDTH', str(default_width)))
-    height = int(source.get('VIDEO_HEIGHT', str(default_height)))
-    fps = float(source.get('FRAME_RATE', str(default_fps)))
+        width = int(source.get('VIDEO_WIDTH', str(VIDEO_WIDTH)))
+        height = int(source.get('VIDEO_HEIGHT', str(VIDEO_HEIGHT)))
+        fps = float(source.get('FRAME_RATE', str(FRAME_RATE)))
     return CameraMode(input_format='h264', width=width, height=height, fps=fps)
 
 
