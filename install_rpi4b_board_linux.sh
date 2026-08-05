@@ -46,7 +46,6 @@ COMMAND_WS_URL="$(resolve_config_value COMMAND_WS_URL '')"
 COMMAND_WS_RETRY_SECONDS="$(resolve_config_value COMMAND_WS_RETRY_SECONDS 1.0)"
 STREAM_STATUS_POLL_SECONDS="$(resolve_config_value STREAM_STATUS_POLL_SECONDS 1.0)"
 STREAM_DISABLE_GRACE_SECONDS="$(resolve_config_value STREAM_DISABLE_GRACE_SECONDS 8.0)"
-FRAME_RATE="$(resolve_config_value FRAME_RATE 60)"
 VIDEO_WIDTH="$(resolve_config_value VIDEO_WIDTH 1280)"
 VIDEO_HEIGHT="$(resolve_config_value VIDEO_HEIGHT 720)"
 PICAMERA_BITRATE="$(resolve_config_value PICAMERA_BITRATE 2000000)"
@@ -54,6 +53,18 @@ PICAMERA_PROFILE="$(resolve_config_value PICAMERA_PROFILE baseline)"
 PICAMERA_LEVEL="$(resolve_config_value PICAMERA_LEVEL '')"
 PICAMERA_SENSOR="$(resolve_config_value PICAMERA_SENSOR auto)"
 PICAMERA_CAMERA_INDEX="$(resolve_config_value PICAMERA_CAMERA_INDEX auto)"
+resolve_frame_rate_default() {
+  local sensor_hint="${1:-auto}"
+  case "$sensor_hint" in
+    imx219)
+      printf '30'
+      ;;
+    *)
+      printf '60'
+      ;;
+  esac
+}
+FRAME_RATE="$(resolve_config_value FRAME_RATE "$(resolve_frame_rate_default "$PICAMERA_SENSOR")")"
 MEDIAMTX_RTSP_URL="$(resolve_config_value MEDIAMTX_RTSP_URL '')"
 GPIO_DRY_RUN="$(resolve_config_value GPIO_DRY_RUN 0)"
 DRIVE_IN1_PIN="$(resolve_config_value DRIVE_IN1_PIN 18)"

@@ -21,6 +21,9 @@ STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRA
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '60'))
 VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1280'))
 VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
+IMX219_FRAME_RATE = float(os.environ.get('PICAMERA_IMX219_FRAME_RATE', '30'))
+IMX219_VIDEO_WIDTH = int(os.environ.get('PICAMERA_IMX219_VIDEO_WIDTH', '1280'))
+IMX219_VIDEO_HEIGHT = int(os.environ.get('PICAMERA_IMX219_VIDEO_HEIGHT', '720'))
 PICAMERA_BITRATE = int(os.environ.get('PICAMERA_BITRATE', '2000000'))
 PICAMERA_PROFILE = (os.environ.get('PICAMERA_PROFILE', 'baseline') or '').strip()
 PICAMERA_LEVEL = (os.environ.get('PICAMERA_LEVEL', '') or '').strip()
@@ -151,9 +154,19 @@ def mode_to_dict(camera_mode):
 
 def resolve_requested_camera_mode(env=None):
     source = os.environ if env is None else env
-    width = int(source.get('VIDEO_WIDTH', str(VIDEO_WIDTH)))
-    height = int(source.get('VIDEO_HEIGHT', str(VIDEO_HEIGHT)))
-    fps = float(source.get('FRAME_RATE', str(FRAME_RATE)))
+    sensor_hint = (source.get('PICAMERA_SENSOR', PICAMERA_SENSOR) or '').strip().lower()
+    if sensor_hint == 'imx219':
+        default_width = IMX219_VIDEO_WIDTH
+        default_height = IMX219_VIDEO_HEIGHT
+        default_fps = IMX219_FRAME_RATE
+    else:
+        default_width = VIDEO_WIDTH
+        default_height = VIDEO_HEIGHT
+        default_fps = FRAME_RATE
+
+    width = int(source.get('VIDEO_WIDTH', str(default_width)))
+    height = int(source.get('VIDEO_HEIGHT', str(default_height)))
+    fps = float(source.get('FRAME_RATE', str(default_fps)))
     return CameraMode(input_format='h264', width=width, height=height, fps=fps)
 
 

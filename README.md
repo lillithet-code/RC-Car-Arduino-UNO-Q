@@ -87,6 +87,7 @@ Raspberry Pi 4B + Pi Camera 3 variables:
 - `PICAMERA_LEVEL`: optional H.264 level passed to Pi camera app (default empty; set only if your Pi camera build supports it)
 - `PICAMERA_SENSOR`: optional sensor hint for auto camera selection (for example `imx219` or `imx708`; default `auto`)
 - `PICAMERA_CAMERA_INDEX`: optional explicit camera index from `rpicam-vid --list-cameras` (default `auto`)
+- `PICAMERA_IMX219_FRAME_RATE`, `PICAMERA_IMX219_VIDEO_WIDTH`, `PICAMERA_IMX219_VIDEO_HEIGHT`: override the safer IMX219 defaults when the Camera Module 2 needs a custom capture profile
 - `LIBCAMERA_BIN`: optional override camera binary path/name; auto-detects `rpicam-vid` then `libcamera-vid`
 - `GPIO_DRY_RUN`: if `1`, logs commands without toggling GPIO
 - `DRIVE_IN1_PIN`, `DRIVE_IN2_PIN`: DRV8871 drivetrain PWM pins (defaults `18`, `19`)
@@ -106,6 +107,7 @@ Raspberry Pi PWM note:
 Switching between Camera Module 3 (IMX708) and IMX219:
 - Set `PICAMERA_SENSOR=imx708` for Camera Module 3 or `PICAMERA_SENSOR=imx219` for IMX219 and restart service.
 - If multiple cameras are attached, set `PICAMERA_CAMERA_INDEX` directly (for example `0` or `1`) for deterministic selection.
+- IMX219 uses a safer 1280x720@30 default unless you override the IMX219-specific variables above.
 
 ## Server-side variables
 - `BOARD_TOKEN`: shared board token
