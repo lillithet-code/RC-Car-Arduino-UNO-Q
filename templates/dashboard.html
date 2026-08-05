@@ -193,6 +193,7 @@
     const videoStage = document.getElementById('video-stage');
     const streamRefreshIntervalMs = 500;
     const commandHeartbeatIntervalMs = 120;
+    const commandExpiryMs = 500;
     const webRtcRetryBaseMs = 1000;
     const webRtcRetryMaxMs = 10000;
     let dragging = false;
@@ -205,7 +206,8 @@
     let billingStarted = false;
     let startRequestInFlight = false;
     let visibilityRequestInFlight = false;
-    let currentDriveAction = 'stop';
+    let currentDesiredState = { throttle: 0, steering: 0, lights: false, stop: true };
+    let commandSequence = 1;
     let streamConnectionError = null;
     let streamWhepUrl = null;
     let currentWhepSessionUrl = null;
@@ -479,17 +481,16 @@
       const centerY = rect.top + rect.height / 2;
       const dx = Math.max(-1, Math.min(1, (x - centerX) / (rect.width / 2)));
       const dy = Math.max(-1, Math.min(1, (y - centerY) / (rect.height / 2)));
-      const absX = Math.abs(dx);
-      const absY = Math.abs(dy);
-      let action = 'stop';
-      if (absX > absY) {
-        action = dx > 0 ? 'right' : 'left';
-      } else if (absY > absX) {
-        action = dy > 0 ? 'back' : 'forward';
-      }
       knobElement.style.left = `${75 + dx * 55}px`;
       knobElement.style.top = `${75 + dy * 55}px`;
-      sendAction(action);
+      const deadzone = 0.08;
+      const throttle = Math.abs(dy) < deadzone ? 0 : -dy;
+      const steering = Math.abs(dx) < deadzone ? 0 : dx;
+      sendDesiredState({
+        throttle,
+        steering,
+        stop: Math.abs(throttle) < 0.001,
+      });
     }
 
     function showFullscreenJoystickAt(x, y) {
@@ -522,7 +523,7 @@
       activeJoystick = null;
       hideFullscreenJoystick();
       if (forceStop) {
-        sendAction('stop', true);
+        sendDesiredState({ throttle: 0, steering: 0, stop: true }, true);
       }
     }
 
@@ -952,15 +953,26 @@
       setInterval(postStreamVisibility, 1000);
     }
 
-    function sendAction(action, force = false) {
-      currentDriveAction = action;
-      if (!force && action === 'stop' && !dragging) {
+    function sendDesiredState(partialState, force = false) {
+      currentDesiredState = {
+        ...currentDesiredState,
+        ...(partialState || {}),
+      };
+      if (!force && currentDesiredState.stop && !dragging) {
         return;
       }
+      commandSequence += 1;
       fetch('/api/control', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ action })
+        body: JSON.stringify({
+          sequence: commandSequence,
+          expires_in_ms: commandExpiryMs,
+          throttle: currentDesiredState.throttle,
+          steering: currentDesiredState.steering,
+          lights: currentDesiredState.lights,
+          stop: Boolean(currentDesiredState.stop),
+        })
       }).catch(() => {});
     }
 
@@ -1041,8 +1053,8 @@
       if (!hasActiveSession) {
         return;
       }
-      if (dragging && currentDriveAction !== 'stop') {
-        sendAction(currentDriveAction, true);
+      if (dragging || !currentDesiredState.stop) {
+        sendDesiredState(currentDesiredState, true);
       }
     }, commandHeartbeatIntervalMs);
   </script>

@@ -21,7 +21,7 @@ Remote RC car control stack with per-car session isolation, MediaMTX passthrough
    - `uno_q_board_stream_sender.py` publishes camera to MediaMTX RTSP target from server config
    - `uno_q_board_commands.py` consumes per-car command WebSocket and writes serial/RPC commands to MCU
 - Raspberry Pi 4B + Camera Module 3 helpers:
-   - `rpi4b_picam3_board_stream_sender.py` publishes Pi Camera H.264 via `rpicam-vid`/`libcamera-vid` to MediaMTX RTSP
+   - `rpi_csi_stream_sender.py` publishes CSI camera H.264 via `rpicam-vid`/`libcamera-vid` to MediaMTX RTSP
    - `rpi4b_board_commands.py` consumes per-car command WebSocket and drives GPIO motor/light pins
 - Arduino firmware:
    - Stops drivetrain if no motion command arrives for ~550 ms
@@ -64,7 +64,7 @@ python3 uno_q_board_stream_sender.py
 python3 uno_q_board_commands.py
 
 # Raspberry Pi 4B board helpers
-python3 rpi4b_picam3_board_stream_sender.py
+python3 rpi_csi_stream_sender.py
 python3 rpi4b_board_commands.py
 ```
 
@@ -78,6 +78,7 @@ python3 rpi4b_board_commands.py
 - `H264_ENCODER`: defaults to `libx264`; set an available encoder explicitly if the board supports low-latency hardware encode reliably
 - `COMMAND_WS_URL`: optional explicit command WS URL
 - `MEDIAMTX_RTSP_URL`: optional fixed override target (if not using server-provided URL)
+- `MOTOR_WATCHDOG_MS`: board-authoritative dead-man timeout; motor is forced to stop if no fresh command arrives (default `500`)
 - `BOARD_TYPE`: installer selector, use `uno_q` or `rpi4b` in `install_unified.conf` / `install_unified.local.conf`
 
 Raspberry Pi 4B + Pi Camera 3 variables:

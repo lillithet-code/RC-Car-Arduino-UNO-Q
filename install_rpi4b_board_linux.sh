@@ -46,6 +46,7 @@ COMMAND_WS_URL="$(resolve_config_value COMMAND_WS_URL '')"
 COMMAND_WS_RETRY_SECONDS="$(resolve_config_value COMMAND_WS_RETRY_SECONDS 1.0)"
 STREAM_STATUS_POLL_SECONDS="$(resolve_config_value STREAM_STATUS_POLL_SECONDS 1.0)"
 STREAM_DISABLE_GRACE_SECONDS="$(resolve_config_value STREAM_DISABLE_GRACE_SECONDS 8.0)"
+MOTOR_WATCHDOG_MS="$(resolve_config_value MOTOR_WATCHDOG_MS 500)"
 VIDEO_WIDTH="$(resolve_config_value VIDEO_WIDTH 1280)"
 VIDEO_HEIGHT="$(resolve_config_value VIDEO_HEIGHT 720)"
 PICAMERA_BITRATE="$(resolve_config_value PICAMERA_BITRATE 2000000)"
@@ -111,7 +112,7 @@ sync_runtime_files() {
   local target_dir="$BOARD_DIR"
 
   mkdir -p "$target_dir"
-  for relative_path in rpi4b_picam3_board_stream_sender.py rpi4b_board_commands.py requirements_rpi4b_board.txt; do
+  for relative_path in rpi_csi_stream_sender.py rpi4b_picam3_board_stream_sender.py rpi4b_board_commands.py requirements_rpi4b_board.txt; do
     local source_file="$source_dir/$relative_path"
     local target_file="$target_dir/$relative_path"
     if [[ -f "$source_file" ]]; then
@@ -212,6 +213,7 @@ COMMAND_WS_URL=$COMMAND_WS_URL
 COMMAND_WS_RETRY_SECONDS=$COMMAND_WS_RETRY_SECONDS
 STREAM_STATUS_POLL_SECONDS=$STREAM_STATUS_POLL_SECONDS
 STREAM_DISABLE_GRACE_SECONDS=$STREAM_DISABLE_GRACE_SECONDS
+MOTOR_WATCHDOG_MS=$MOTOR_WATCHDOG_MS
 FRAME_RATE=$FRAME_RATE
 VIDEO_WIDTH=$VIDEO_WIDTH
 VIDEO_HEIGHT=$VIDEO_HEIGHT
@@ -245,7 +247,7 @@ EOF
 sudo chown "$BOARD_RUN_USER":"$BOARD_RUN_USER" "$BOARD_DIR/.env"
 sudo chmod 600 "$BOARD_DIR/.env"
 
-cat > "$BOARD_DIR/start_rpi4b_board.sh" <<'EOF2'
+cat > "$BOARD_DIR/start_rc_car_command.sh" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -260,60 +262,76 @@ if [[ -f "$DIR/.env" ]]; then
 fi
 set +a
 export PYTHONUNBUFFERED=1
-python3 -u "$DIR/rpi4b_picam3_board_stream_sender.py" &
-STREAM_PID=$!
-python3 -u "$DIR/rpi4b_board_commands.py" &
-COMMAND_PID=$!
-
-shutdown_children() {
-  kill "$STREAM_PID" "$COMMAND_PID" 2>/dev/null || true
-  wait "$STREAM_PID" "$COMMAND_PID" 2>/dev/null || true
-}
-
-handle_termination() {
-  shutdown_children
-  trap - EXIT
-  exit 0
-}
-
-trap shutdown_children EXIT
-trap handle_termination INT TERM
-
-set +e
-wait -n "$STREAM_PID" "$COMMAND_PID"
-CHILD_STATUS=$?
-set -e
-echo "A Raspberry Pi board child process exited (status=$CHILD_STATUS); stopping sibling so systemd can restart both." >&2
-if [[ "$CHILD_STATUS" -eq 0 ]]; then
-  exit 1
-fi
-exit "$CHILD_STATUS"
+exec python3 -u "$DIR/rpi4b_board_commands.py"
 EOF2
 
-chmod +x "$BOARD_DIR/start_rpi4b_board.sh"
+chmod +x "$BOARD_DIR/start_rc_car_command.sh"
 
-cat > "$BOARD_DIR/rc-car-rpi4b-board.service" <<EOF3
+cat > "$BOARD_DIR/start_rc_car_stream.sh" <<'EOF3'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -f "$DIR/.venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$DIR/.venv/bin/activate"
+fi
+set -a
+if [[ -f "$DIR/.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$DIR/.env"
+fi
+set +a
+export PYTHONUNBUFFERED=1
+exec python3 -u "$DIR/rpi_csi_stream_sender.py"
+EOF3
+
+chmod +x "$BOARD_DIR/start_rc_car_stream.sh"
+
+cat > "$BOARD_DIR/rc-car-command.service" <<EOF4
 [Unit]
-Description=RC Car Raspberry Pi 4B board stream and command service
+Description=RC Car Raspberry Pi command service
 After=network.target
 
 [Service]
 WorkingDirectory=$BOARD_DIR
 EnvironmentFile=$BOARD_DIR/.env
-ExecStart=$BOARD_DIR/start_rpi4b_board.sh
+ExecStart=$BOARD_DIR/start_rc_car_command.sh
 Restart=always
-RestartSec=5
+RestartSec=2
 User=$BOARD_RUN_USER
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
-EOF3
+EOF4
 
-sudo mv "$BOARD_DIR/rc-car-rpi4b-board.service" /etc/systemd/system/rc-car-rpi4b-board.service
+cat > "$BOARD_DIR/rc-car-stream.service" <<EOF5
+[Unit]
+Description=RC Car Raspberry Pi stream service
+After=network.target
+
+[Service]
+WorkingDirectory=$BOARD_DIR
+EnvironmentFile=$BOARD_DIR/.env
+ExecStart=$BOARD_DIR/start_rc_car_stream.sh
+Restart=always
+RestartSec=2
+User=$BOARD_RUN_USER
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF5
+
+sudo mv "$BOARD_DIR/rc-car-command.service" /etc/systemd/system/rc-car-command.service
+sudo mv "$BOARD_DIR/rc-car-stream.service" /etc/systemd/system/rc-car-stream.service
 sudo systemctl daemon-reload
-sudo systemctl enable rc-car-rpi4b-board.service
+sudo systemctl disable --now rc-car-rpi4b-board.service >/dev/null 2>&1 || true
+sudo systemctl enable rc-car-command.service rc-car-stream.service
 if command -v systemctl >/dev/null 2>&1; then
-  sudo systemctl restart rc-car-rpi4b-board.service >/dev/null 2>&1 || true
+  sudo systemctl restart rc-car-command.service rc-car-stream.service >/dev/null 2>&1 || true
 fi
 
 if command -v curl >/dev/null 2>&1; then
@@ -348,7 +366,8 @@ cat <<EOF
 Raspberry Pi 4B board install completed.
 
 Next steps:
-1. Start the service: sudo systemctl start rc-car-rpi4b-board
-2. Check logs: sudo journalctl -u rc-car-rpi4b-board -f
+1. Start services: sudo systemctl start rc-car-command rc-car-stream
+2. Check command logs: sudo journalctl -u rc-car-command -f
+3. Check stream logs: sudo journalctl -u rc-car-stream -f
 3. If groups were changed, log out/in once so new video/gpio membership applies.
 EOF

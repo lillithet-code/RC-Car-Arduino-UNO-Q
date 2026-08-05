@@ -7,7 +7,7 @@ import json
 import ipaddress
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from queue import Empty, Full, Queue
+from queue import Empty, Queue
 from sqlite3 import dbapi2 as sqlite3
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -110,7 +110,11 @@ def create_app(test_config=None):
     app.config['BOARD_POLL_INTERVAL_SECONDS'] = max(1.0, float(os.environ.get('BOARD_POLL_INTERVAL_SECONDS', '2.0')))
     app.config['BOARD_POLL_TIMEOUT_SECONDS'] = max(0.2, float(os.environ.get('BOARD_POLL_TIMEOUT_SECONDS', '1.5')))
     app.config['BOARD_ACTIVE_STALE_SECONDS'] = max(2.0, float(os.environ.get('BOARD_ACTIVE_STALE_SECONDS', '8.0')))
-    app.config['COMMAND_QUEUE_MAX'] = max(1, int(os.environ.get('COMMAND_QUEUE_MAX', '32')))
+    app.config['COMMAND_EXPIRES_DEFAULT_MS'] = max(200, int(os.environ.get('COMMAND_EXPIRES_DEFAULT_MS', '500')))
+    app.config['COMMAND_EXPIRES_MAX_MS'] = max(
+        app.config['COMMAND_EXPIRES_DEFAULT_MS'],
+        int(os.environ.get('COMMAND_EXPIRES_MAX_MS', '1200')),
+    )
     app.config['MEDIAMTX_RTSP_BASE'] = os.environ.get('MEDIAMTX_RTSP_BASE', '').strip().rstrip('/')
     app.config['MEDIAMTX_WHEP_BASE'] = os.environ.get('MEDIAMTX_WHEP_BASE', '').strip().rstrip('/')
     app.config['MEDIAMTX_STREAM_PREFIX'] = os.environ.get('MEDIAMTX_STREAM_PREFIX', 'cars').strip().strip('/') or 'cars'
@@ -251,6 +255,7 @@ def create_app(test_config=None):
                 db.execute("UPDATE sessions SET status = 'expired' WHERE id = ?", (row['id'],))
                 db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
                 mark_session_visible(row['id'], False)
+                force_stop_command(device_name, reason='session_expired')
                 changed = True
                 continue
 
@@ -269,6 +274,7 @@ def create_app(test_config=None):
                 db.execute("UPDATE devices SET status = 'available' WHERE id = ?", (row['device_id'],))
                 db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (remaining_seconds, row['user_id']))
                 mark_session_visible(row['id'], False)
+                force_stop_command(device_name, reason='stream_lost')
                 changed = True
 
         if changed:
@@ -338,13 +344,44 @@ def create_app(test_config=None):
         user = get_user_view(user_id)
         return max(0, int(user['balance'])) if user else 0
 
+    def release_user_control_session(user_id, *, new_status='released'):
+        db = get_db()
+        releasable_session = db.execute(
+            """
+            SELECT s.id, s.device_id, s.status, s.billing_started_at, s.allocated_seconds,
+                   s.consumed_seconds, s.last_billing_at, d.name AS board_name
+            FROM sessions s
+            JOIN devices d ON d.id = s.device_id
+            WHERE s.user_id = ? AND s.status IN ('active', 'stream_lost')
+            ORDER BY s.id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+
+        if releasable_session is None:
+            return None
+
+        refundable_seconds = 0
+        if releasable_session['status'] == 'active':
+            refundable_seconds = get_remaining_seconds(user_id, releasable_session)
+
+        db.execute('UPDATE sessions SET status = ? WHERE id = ?', (new_status, releasable_session['id']))
+        if refundable_seconds > 0:
+            db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refundable_seconds, user_id))
+        mark_session_visible(releasable_session['id'], False)
+        force_stop_command(releasable_session['board_name'], reason=f'user_{new_status}')
+        db.commit()
+        sync_device_statuses(db)
+        return releasable_session
+
     init_db()
 
     default_board_name = '__default__'
     stream_states = {}
-    command_queues = {}
+    command_states = {}
     stream_state_lock = threading.Lock()
-    command_queue_lock = threading.Lock()
+    command_state_lock = threading.Lock()
     pipeline_frame_counter = 0
     app_state = {
         'session_visible_at': {},
@@ -380,31 +417,110 @@ def create_app(test_config=None):
                 stream_states[key] = state
         return state
 
-    def get_command_queue(raw_board_name):
-        key = board_key(raw_board_name)
-        with command_queue_lock:
-            queue = command_queues.get(key)
-            if queue is None:
-                queue = Queue(maxsize=app.config['COMMAND_QUEUE_MAX'])
-                command_queues[key] = queue
-        return queue
+    def clamp(value, low, high):
+        return max(low, min(high, value))
 
-    def put_command(raw_board_name, action):
-        queue = get_command_queue(raw_board_name)
-        dropped_oldest = False
-        try:
-            queue.put_nowait(action)
-        except Full:
+    def now_millis():
+        return int(time.time() * 1000)
+
+    def stop_command_payload(sequence, expires_in_ms=None, lights=False):
+        ttl = int(expires_in_ms or app.config['COMMAND_EXPIRES_DEFAULT_MS'])
+        ttl = clamp(ttl, 200, app.config['COMMAND_EXPIRES_MAX_MS'])
+        return {
+            'sequence': int(sequence),
+            'expires_in_ms': ttl,
+            'issued_at_ms': now_millis(),
+            'throttle': 0.0,
+            'steering': 0.0,
+            'lights': bool(lights),
+            'stop': True,
+            'action': 'stop',
+        }
+
+    def command_state_for_board(raw_board_name):
+        key = board_key(raw_board_name)
+        with command_state_lock:
+            state = command_states.get(key)
+            if state is None:
+                state = {
+                    'last_sequence': 0,
+                    'payload': stop_command_payload(1),
+                }
+                command_states[key] = state
+        return state
+
+    def latest_command_payload(raw_board_name):
+        state = command_state_for_board(raw_board_name)
+        return dict(state['payload'])
+
+    def set_latest_command(raw_board_name, payload, *, force=False):
+        key = board_key(raw_board_name)
+        with command_state_lock:
+            state = command_states.get(key)
+            if state is None:
+                state = {
+                    'last_sequence': 0,
+                    'payload': stop_command_payload(1),
+                }
+                command_states[key] = state
+
+            last_sequence = int(state['last_sequence'])
+            incoming_sequence = payload.get('sequence')
+            if incoming_sequence is None:
+                incoming_sequence = last_sequence + 1
             try:
-                queue.get_nowait()
-                dropped_oldest = True
-            except Empty:
-                pass
+                incoming_sequence = int(incoming_sequence)
+            except (TypeError, ValueError):
+                return {'accepted': False, 'reason': 'invalid sequence', 'sequence': last_sequence}
+
+            if incoming_sequence < last_sequence and not force:
+                return {'accepted': False, 'reason': 'out_of_order', 'sequence': last_sequence}
+
+            expires_in_ms = payload.get('expires_in_ms', app.config['COMMAND_EXPIRES_DEFAULT_MS'])
             try:
-                queue.put_nowait(action)
-            except Full:
-                pass
-        return dropped_oldest
+                expires_in_ms = int(expires_in_ms)
+            except (TypeError, ValueError):
+                return {'accepted': False, 'reason': 'invalid expires_in_ms', 'sequence': last_sequence}
+
+            expires_in_ms = clamp(expires_in_ms, 200, app.config['COMMAND_EXPIRES_MAX_MS'])
+
+            try:
+                throttle = float(payload.get('throttle', 0.0))
+                steering = float(payload.get('steering', 0.0))
+            except (TypeError, ValueError):
+                return {'accepted': False, 'reason': 'invalid numeric fields', 'sequence': last_sequence}
+
+            throttle = clamp(throttle, -1.0, 1.0)
+            steering = clamp(steering, -1.0, 1.0)
+            lights = bool(payload.get('lights', False))
+            stop = bool(payload.get('stop', False) or abs(throttle) < 1e-6)
+            if stop:
+                throttle = 0.0
+
+            sanitized = {
+                'sequence': incoming_sequence,
+                'expires_in_ms': expires_in_ms,
+                'issued_at_ms': now_millis(),
+                'throttle': throttle,
+                'steering': steering,
+                'lights': lights,
+                'stop': stop,
+                'action': 'stop' if stop else None,
+            }
+
+            state['last_sequence'] = incoming_sequence
+            state['payload'] = sanitized
+            return {'accepted': True, 'reason': 'ok', 'sequence': incoming_sequence, 'payload': dict(sanitized)}
+
+    def force_stop_command(raw_board_name, *, keep_lights=False, reason='forced_stop'):
+        state = command_state_for_board(raw_board_name)
+        sequence = int(state['last_sequence']) + 1
+        current = latest_command_payload(raw_board_name)
+        payload = stop_command_payload(sequence, lights=(current.get('lights') if keep_lights else False))
+        result = set_latest_command(raw_board_name, payload, force=True)
+        if result.get('accepted'):
+            result['reason'] = reason
+        return result
 
     def get_latest_stream_chunk(raw_board_name=None):
         state = get_stream_state(raw_board_name)
@@ -889,6 +1005,7 @@ def create_app(test_config=None):
                 return None
 
             if (now - last_activity_dt).total_seconds() > timeout_seconds:
+                release_user_control_session(session['user_id'], new_status='timeout')
                 session.clear()
                 if request.path not in ('/login', '/register', '/logout') and not request.path.startswith('/static'):
                     return redirect(url_for('login'))
@@ -944,6 +1061,8 @@ def create_app(test_config=None):
 
     @app.route('/logout')
     def logout():
+        if 'user_id' in session:
+            release_user_control_session(session['user_id'], new_status='logged_out')
         session.pop('user_id', None)
         session.pop('last_activity', None)
         return redirect(url_for('login'))
@@ -1001,30 +1120,7 @@ def create_app(test_config=None):
         if 'user_id' not in session:
             return redirect(url_for('login'))
 
-        db = get_db()
-        releasable_session = db.execute(
-            """
-            SELECT id, device_id, status, billing_started_at, allocated_seconds, consumed_seconds, last_billing_at
-            FROM sessions
-            WHERE user_id = ? AND status IN ('active', 'stream_lost')
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (session['user_id'],),
-        ).fetchone()
-
-        if releasable_session:
-            refundable_seconds = 0
-            if releasable_session['status'] == 'active':
-                refundable_seconds = get_remaining_seconds(session['user_id'], releasable_session)
-
-            db.execute("UPDATE sessions SET status = 'released' WHERE id = ?", (releasable_session['id'],))
-            if refundable_seconds > 0:
-                db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refundable_seconds, session['user_id']))
-            mark_session_visible(releasable_session['id'], False)
-            db.commit()
-
-        sync_device_statuses(db)
+        release_user_control_session(session['user_id'], new_status='released')
         return redirect(url_for('index'))
 
     @app.route('/api/session/status')
@@ -1314,16 +1410,57 @@ def create_app(test_config=None):
             return jsonify({'status': 'error', 'message': 'no active session'}), 409
 
         payload = request.get_json(silent=True) or {}
-        action = (payload.get('action') or '').strip().lower()
-        if not action:
-            return jsonify({'status': 'error', 'message': 'action is required'}), 400
-
-        if action not in {'forward', 'back', 'left', 'right', 'stop', 'lights_on', 'lights_off'}:
-            return jsonify({'status': 'error', 'message': 'invalid action'}), 400
-
         board_name = active_session['name']
-        dropped_oldest = put_command(board_name, action)
-        return jsonify({'status': 'ok', 'action': action, 'board_name': board_name, 'dropped_oldest': dropped_oldest})
+        action = (payload.get('action') or '').strip().lower()
+
+        desired = {
+            'sequence': payload.get('sequence'),
+            'expires_in_ms': payload.get('expires_in_ms', app.config['COMMAND_EXPIRES_DEFAULT_MS']),
+            'throttle': payload.get('throttle', 0.0),
+            'steering': payload.get('steering', 0.0),
+            'lights': payload.get('lights', False),
+            'stop': bool(payload.get('stop', False)),
+        }
+
+        # Backwards-compatible action mapping for existing clients.
+        if action:
+            if action == 'forward':
+                desired['throttle'] = 1.0
+                desired['steering'] = 0.0
+            elif action == 'back':
+                desired['throttle'] = -1.0
+                desired['steering'] = 0.0
+            elif action == 'left':
+                desired['steering'] = -1.0
+            elif action == 'right':
+                desired['steering'] = 1.0
+            elif action == 'stop':
+                desired['stop'] = True
+                desired['throttle'] = 0.0
+                desired['steering'] = 0.0
+            elif action == 'lights_on':
+                desired['lights'] = True
+            elif action == 'lights_off':
+                desired['lights'] = False
+            else:
+                return jsonify({'status': 'error', 'message': 'invalid action'}), 400
+
+        result = set_latest_command(board_name, desired)
+        if not result.get('accepted'):
+            status = 409 if result.get('reason') == 'out_of_order' else 400
+            return jsonify({'status': 'error', 'message': result.get('reason'), 'board_name': board_name}), status
+
+        applied = result['payload']
+        return jsonify({
+            'status': 'ok',
+            'board_name': board_name,
+            'sequence': applied['sequence'],
+            'expires_in_ms': applied['expires_in_ms'],
+            'throttle': applied['throttle'],
+            'steering': applied['steering'],
+            'lights': applied['lights'],
+            'stop': applied['stop'],
+        })
 
     @sock.route('/ws/board/commands')
     def board_command_ws(ws):
@@ -1343,26 +1480,21 @@ def create_app(test_config=None):
             return
 
         mark_board_activity_for_device('command_ws_connect', board_name)
-        command_queue = get_command_queue(board_name)
 
         while True:
-            try:
-                action = command_queue.get(timeout=1.0)
-            except Empty:
-                action = None
-
-            payload = {
+            payload = latest_command_payload(board_name)
+            payload.update({
                 'status': 'ok',
-                'action': action,
                 'board_name': board_name,
-                'keepalive': action is None,
-            }
+                'keepalive': False,
+            })
             try:
                 ws.send(json.dumps(payload))
             except (ConnectionClosed, BrokenPipeError):
                 break
             except Exception:
                 break
+            time.sleep(0.12)
 
     @app.route('/api/board/command')
     def board_command():
@@ -1374,12 +1506,9 @@ def create_app(test_config=None):
             return jsonify({'status': 'error', 'message': 'board_name is required'}), 400
 
         mark_board_activity_for_device('command_poll', board_name)
-
-        try:
-            action = get_command_queue(board_name).get_nowait()
-        except Empty:
-            return jsonify({'status': 'ok', 'action': None, 'board_name': board_name})
-        return jsonify({'status': 'ok', 'action': action, 'board_name': board_name})
+        payload = latest_command_payload(board_name)
+        payload.update({'status': 'ok', 'board_name': board_name, 'keepalive': False})
+        return jsonify(payload)
 
     @app.route('/api/board/stream/report', methods=['POST'])
     def board_stream_report():
@@ -1490,6 +1619,7 @@ def create_app(test_config=None):
         db = get_db()
         sync_device_statuses(db)
         enabled, stream_urls, preferred_profile = resolve_board_stream_state(board_name, db)
+        mediamtx_state = fetch_mediamtx_path_state(board_name)
 
         mark_board_activity_for_device('stream_status_poll', board_name)
         return jsonify({
@@ -1501,6 +1631,11 @@ def create_app(test_config=None):
             'whep_url': stream_urls['whep_url'],
             'rtsp_url': stream_urls['rtsp_url'],
             'video_profile': preferred_profile,
+            'stream_live': bool(mediamtx_state['stream_live']),
+            'stream_ready': bool(mediamtx_state['stream_ready']),
+            'mediamtx_reachable': bool(mediamtx_state['reachable']),
+            'mediamtx_bytes_received': mediamtx_state['bytes_received'],
+            'mediamtx_error': mediamtx_state['error'],
         })
 
     @app.route('/api/board/stream/config')
@@ -1514,6 +1649,7 @@ def create_app(test_config=None):
 
         db = get_db()
         enabled, stream_urls, preferred_profile = resolve_board_stream_state(board_name, db)
+        mediamtx_state = fetch_mediamtx_path_state(board_name)
 
         mark_board_activity_for_device('stream_config_poll', board_name)
         return jsonify({
@@ -1524,6 +1660,11 @@ def create_app(test_config=None):
             'whep_url': stream_urls['whep_url'],
             'rtsp_url': stream_urls['rtsp_url'],
             'video_profile': preferred_profile,
+            'stream_live': bool(mediamtx_state['stream_live']),
+            'stream_ready': bool(mediamtx_state['stream_ready']),
+            'mediamtx_reachable': bool(mediamtx_state['reachable']),
+            'mediamtx_bytes_received': mediamtx_state['bytes_received'],
+            'mediamtx_error': mediamtx_state['error'],
         })
 
     @app.route('/api/board/status')

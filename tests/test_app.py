@@ -751,14 +751,110 @@ def test_board_commands_are_exposed_for_the_board_client(client):
     request_response = client.post('/request_car')
     assert request_response.status_code == 200
 
-    response = client.post('/api/control', json={'action': 'forward'})
+    response = client.post('/api/control', json={
+        'sequence': 11,
+        'expires_in_ms': 500,
+        'throttle': 0.65,
+        'steering': -0.25,
+        'lights': True,
+    })
     assert response.status_code == 200
 
     board_response = client.get('/api/board/command?board_name=rc-car-otto')
     assert board_response.status_code == 200
     payload = board_response.get_json()
     assert payload['status'] == 'ok'
-    assert payload['action'] == 'forward'
+    assert payload['sequence'] == 11
+    assert payload['throttle'] == 0.65
+    assert payload['steering'] == -0.25
+    assert payload['lights'] is True
+    assert payload['stop'] is False
+
+
+def test_release_car_overwrites_motion_with_stop(client):
+    client.post('/register', data={
+        'username': 'safety',
+        'password': 'secret123',
+        'email': 'safety@example.com'
+    })
+    client.post('/login', data={
+        'username': 'safety',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-safety',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-safety')
+    assert client.post('/request_car').status_code == 200
+
+    assert client.post('/api/control', json={'sequence': 1, 'throttle': 1.0, 'steering': 0.4}).status_code == 200
+    assert client.post('/release_car', follow_redirects=True).status_code == 200
+
+    board_state = client.get('/api/board/command?board_name=rc-car-safety').get_json()
+    assert board_state['status'] == 'ok'
+    assert board_state['stop'] is True
+    assert board_state['throttle'] == 0.0
+
+
+def test_logout_overwrites_motion_with_stop(client):
+    client.post('/register', data={
+        'username': 'logoutsafe',
+        'password': 'secret123',
+        'email': 'logoutsafe@example.com'
+    })
+    client.post('/login', data={
+        'username': 'logoutsafe',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-logout',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-logout')
+    assert client.post('/request_car').status_code == 200
+
+    assert client.post('/api/control', json={'sequence': 2, 'throttle': 1.0, 'steering': 0.0}).status_code == 200
+    assert client.get('/logout', follow_redirects=True).status_code == 200
+
+    board_state = client.get('/api/board/command?board_name=rc-car-logout').get_json()
+    assert board_state['status'] == 'ok'
+    assert board_state['stop'] is True
+    assert board_state['throttle'] == 0.0
+
+
+def test_stream_lost_overwrites_motion_with_stop(client):
+    client.post('/register', data={
+        'username': 'losssafe',
+        'password': 'secret123',
+        'email': 'losssafe@example.com'
+    })
+    client.post('/login', data={
+        'username': 'losssafe',
+        'password': 'secret123'
+    })
+    client.post('/api/devices/register', json={
+        'name': 'rc-car-loss',
+        'kind': 'arduino',
+        'location': 'garage'
+    })
+    mark_board_online(client, 'rc-car-loss')
+    assert client.post('/request_car').status_code == 200
+
+    set_mediamtx_state(client, 'rc-car-loss', ready=True, has_h264=True, bytes_received=1000, stream_live=True)
+    assert client.post('/api/session/start').status_code == 200
+    assert client.post('/api/control', json={'sequence': 3, 'throttle': 0.8, 'steering': -0.3}).status_code == 200
+
+    set_mediamtx_state(client, 'rc-car-loss', exists=False, ready=False, has_h264=False, bytes_received=0, stream_live=False)
+    client.application.config['STREAM_LOSS_GRACE_SECONDS'] = 0.0
+    client.get('/')
+
+    board_state = client.get('/api/board/command?board_name=rc-car-loss').get_json()
+    assert board_state['status'] == 'ok'
+    assert board_state['stop'] is True
+    assert board_state['throttle'] == 0.0
 
 
 def test_board_stream_status_enables_registered_online_boards(client):

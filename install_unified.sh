@@ -158,12 +158,13 @@ install_board() {
       ;;
     rpi4b|raspberry_pi_4b|raspberry_pi_4b_picam3|picam3)
       ./install_rpi4b_board_linux.sh
-      echo "Restarting board service"
-      sudo systemctl restart rc-car-rpi4b-board
+      echo "Restarting board services"
+      sudo systemctl restart rc-car-command rc-car-stream
       echo "Board install complete"
       echo "Verify with:"
-      echo "  sudo systemctl --no-pager --full status rc-car-rpi4b-board"
-      echo "  sudo journalctl -u rc-car-rpi4b-board -n 120 --no-pager"
+      echo "  sudo systemctl --no-pager --full status rc-car-command rc-car-stream"
+      echo "  sudo journalctl -u rc-car-command -n 120 --no-pager"
+      echo "  sudo journalctl -u rc-car-stream -n 120 --no-pager"
       ;;
     *)
       echo "Error: unsupported BOARD_TYPE=$BOARD_TYPE" >&2
