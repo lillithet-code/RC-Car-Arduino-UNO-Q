@@ -1,2 +1,3 @@
 websocket-client==1.8.0
 gpiozero==2.0.1
+lgpio==0.2.2.0

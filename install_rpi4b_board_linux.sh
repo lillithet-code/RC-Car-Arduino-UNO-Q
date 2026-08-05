@@ -111,9 +111,29 @@ sync_runtime_files() {
 sync_runtime_files
 cd "$BOARD_DIR"
 
+select_camera_package() {
+  local package_name
+  for package_name in rpicam-apps-lite rpicam-apps libcamera-apps; do
+    local candidate
+    candidate="$(apt-cache policy "$package_name" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+    if [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
+      printf '%s' "$package_name"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if command -v apt-get >/dev/null 2>&1; then
+  CAMERA_PACKAGE=""
   sudo apt-get update
-  sudo apt-get install -y python3 python3-pip python3-venv ffmpeg libcamera-apps python3-gpiozero
+  if CAMERA_PACKAGE="$(select_camera_package)"; then
+    echo "Installing Pi camera package: $CAMERA_PACKAGE"
+  else
+    echo "Error: no supported Pi camera package is available (tried rpicam-apps-lite, rpicam-apps, libcamera-apps)." >&2
+    exit 1
+  fi
+  sudo apt-get install -y python3 python3-pip python3-venv ffmpeg python3-gpiozero "$CAMERA_PACKAGE"
 
   PIGPIO_CANDIDATE="$(apt-cache policy pigpio 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
   PYTHON3_PIGPIO_CANDIDATE="$(apt-cache policy python3-pigpio 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
@@ -138,6 +158,11 @@ if command -v apt-get >/dev/null 2>&1; then
   fi
 fi
 
+if ! command -v rpicam-vid >/dev/null 2>&1 && ! command -v libcamera-vid >/dev/null 2>&1; then
+  echo "Error: Pi camera publisher binary not found after install. Expected rpicam-vid or libcamera-vid on PATH." >&2
+  exit 1
+fi
+
 if command -v getent >/dev/null 2>&1 && getent group video >/dev/null 2>&1; then
   if ! id -nG "$BOARD_RUN_USER" | tr ' ' '\n' | grep -qx 'video'; then
     echo "Adding $BOARD_RUN_USER to video group for camera device access"
@@ -155,6 +180,14 @@ fi
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python3" -m pip install --upgrade pip
 "$VENV_DIR/bin/python3" -m pip install -r "$BOARD_DIR/requirements_rpi4b_board.txt"
+
+if [[ "$GPIOZERO_PIN_FACTORY" == "lgpio" ]]; then
+  if ! "$VENV_DIR/bin/python3" -c 'import lgpio' >/dev/null 2>&1; then
+    echo "Error: GPIOZERO_PIN_FACTORY=lgpio but the Python lgpio module is unavailable in $VENV_DIR." >&2
+    echo "Install the board requirements again or set GPIOZERO_PIN_FACTORY to a working backend before starting the service." >&2
+    exit 1
+  fi
+fi
 
 cat > "$BOARD_DIR/.env" <<EOF
 SERVER_URL=$SERVER_URL
