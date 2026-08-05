@@ -66,7 +66,11 @@ discover_board_token() {
 
 export_install_defaults() {
   local selected_board_type
-  selected_board_type="$(printf '%s' "${BOARD_TYPE:-uno_q}" | tr '[:upper:]' '[:lower:]')"
+  local default_board_type="uno_q"
+  if [[ "$MODE" == "board" ]]; then
+    default_board_type="rpi4b"
+  fi
+  selected_board_type="$(printf '%s' "${BOARD_TYPE:-$default_board_type}" | tr '[:upper:]' '[:lower:]')"
 
   export PLESK_DOMAIN="${PLESK_DOMAIN:-drive.kbob.org}"
   export MEDIAMTX_WHEP_BASE="${MEDIAMTX_WHEP_BASE:-https://drive.kbob.org}"
@@ -74,7 +78,7 @@ export_install_defaults() {
   export MEDIAMTX_WEBRTC_ADDITIONAL_HOST="${MEDIAMTX_WEBRTC_ADDITIONAL_HOST:-drive.kbob.org}"
   export SERVER_URL="${SERVER_URL:-https://drive.kbob.org}"
   export SERVER_APP_DIR="${SERVER_APP_DIR:-/var/www/vhosts/drive.kbob.org/httpdocs/rc-car-arduino-uno-q}"
-  export BOARD_TYPE="${BOARD_TYPE:-uno_q}"
+  export BOARD_TYPE="${BOARD_TYPE:-$default_board_type}"
 
   if [[ -z "${BOARD_DIR:-}" ]]; then
     case "$selected_board_type" in

@@ -64,11 +64,7 @@ def parse_camera_index(raw_value):
         return None
 
 
-def discover_camera_index_for_sensor(sensor_hint):
-    sensor = (sensor_hint or '').strip().lower()
-    if sensor in {'', 'auto'}:
-        return None
-
+def _list_camera_descriptions():
     try:
         result = subprocess.run(
             [PICAMERA_BIN, '--list-cameras'],
@@ -79,27 +75,54 @@ def discover_camera_index_for_sensor(sensor_hint):
         )
     except Exception as exc:
         print(f'camera list query failed: {exc}', file=sys.stderr)
-        return None
+        return []
 
     output = '\n'.join(part for part in ((result.stdout or ''), (result.stderr or '')) if part)
+    cameras = []
     for line in output.splitlines():
         match = re.search(r'^\s*(\d+)\s*:\s*(.+)$', line)
         if not match:
             continue
-        index = int(match.group(1))
-        description = match.group(2).strip().lower()
-        if sensor in description:
-            return index
+        cameras.append({
+            'index': int(match.group(1)),
+            'description': match.group(2).strip().lower(),
+        })
+    return cameras
+
+
+def discover_picamera_sensor():
+    explicit_sensor = (PICAMERA_SENSOR or '').strip().lower()
+    if explicit_sensor and explicit_sensor != 'auto':
+        return explicit_sensor
+
+    for camera in _list_camera_descriptions():
+        description = camera['description']
+        for sensor_name in ('imx219', 'imx708'):
+            if sensor_name in description:
+                return sensor_name
+
+    return 'auto'
+
+
+def discover_camera_index_for_sensor(sensor_hint):
+    sensor = (sensor_hint or '').strip().lower()
+    if sensor in {'', 'auto'}:
+        return None
+
+    for camera in _list_camera_descriptions():
+        if sensor in camera['description']:
+            return camera['index']
 
     print(f'camera sensor hint not found in list-cameras output: {sensor_hint}', file=sys.stderr)
     return None
 
 
-def resolve_camera_index():
+def resolve_camera_index(sensor_hint=None):
     explicit_index = parse_camera_index(PICAMERA_CAMERA_INDEX)
     if explicit_index is not None:
         return explicit_index
-    return discover_camera_index_for_sensor(PICAMERA_SENSOR)
+    resolved_sensor = sensor_hint or discover_picamera_sensor()
+    return discover_camera_index_for_sensor(resolved_sensor)
 
 
 @dataclass(frozen=True)
@@ -152,10 +175,13 @@ def mode_to_dict(camera_mode):
     }
 
 
-def resolve_requested_camera_mode(env=None):
+def resolve_requested_camera_mode(env=None, sensor_hint=None):
     source = os.environ if env is None else env
-    sensor_hint = (source.get('PICAMERA_SENSOR', PICAMERA_SENSOR) or '').strip().lower()
-    if sensor_hint == 'imx219':
+    resolved_sensor = (sensor_hint or source.get('PICAMERA_SENSOR', PICAMERA_SENSOR) or '').strip().lower()
+    if resolved_sensor == 'auto':
+        resolved_sensor = discover_picamera_sensor()
+
+    if resolved_sensor == 'imx219':
         width = int(source.get('PICAMERA_IMX219_VIDEO_WIDTH', str(IMX219_VIDEO_WIDTH)))
         height = int(source.get('PICAMERA_IMX219_VIDEO_HEIGHT', str(IMX219_VIDEO_HEIGHT)))
         fps = float(source.get('PICAMERA_IMX219_FRAME_RATE', str(IMX219_FRAME_RATE)))
@@ -230,8 +256,14 @@ def report_stream_state(current_mode):
         return False
 
 
-def resolve_profile_from_config(config_payload):
-    requested_mode = resolve_requested_camera_mode()
+def resolve_profile_from_config(config_payload, sensor_hint=None):
+    requested_mode = resolve_requested_camera_mode(sensor_hint=sensor_hint)
+
+    resolved_sensor = (sensor_hint or '').strip().lower()
+    if resolved_sensor in {'', 'auto'}:
+        resolved_sensor = discover_picamera_sensor()
+    if resolved_sensor == 'imx219':
+        return requested_mode
 
     profile = (config_payload or {}).get('video_profile')
     if isinstance(profile, dict):
@@ -387,14 +419,15 @@ def main():
 
     while True:
         config = fetch_stream_config()
+        sensor_hint = discover_picamera_sensor()
         if config is not None:
             stream_enabled = bool(config.get('enabled'))
             configured_rtsp_url = (config.get('rtsp_url') or '').strip()
             publish_url = PUBLISH_RTSP_URL or configured_rtsp_url
-            desired_mode = resolve_profile_from_config(config)
+            desired_mode = resolve_profile_from_config(config, sensor_hint=sensor_hint)
         else:
             publish_url = active_publish_url
-            desired_mode = resolve_profile_from_config(None)
+            desired_mode = resolve_profile_from_config(None, sensor_hint=sensor_hint)
 
         if stream_enabled:
             stream_disabled_since = None
