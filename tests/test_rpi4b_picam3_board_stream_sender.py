@@ -106,3 +106,42 @@ def test_apply_cpu_governor_noops_when_disabled(monkeypatch, tmp_path):
     applied = sender.apply_cpu_governor('powersave', None)
     assert applied is None
     assert cpu0.read_text(encoding='utf-8') == 'ondemand'
+
+
+def test_apply_platform_power_saving_runs_bluetooth_and_hdmi(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return True
+
+    monkeypatch.setattr(sender, 'DISABLE_BLUETOOTH', True)
+    monkeypatch.setattr(sender, 'DISABLE_HDMI', True)
+    monkeypatch.setattr(sender, 'run_optional_command', fake_run)
+
+    bluetooth_disabled, hdmi_disabled = sender.apply_platform_power_saving(False, False)
+
+    assert bluetooth_disabled is True
+    assert hdmi_disabled is True
+    assert calls == [
+        ['rfkill', 'block', 'bluetooth'],
+        ['vcgencmd', 'display_power', '0'],
+    ]
+
+
+def test_apply_platform_power_saving_skips_completed_actions(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return True
+
+    monkeypatch.setattr(sender, 'DISABLE_BLUETOOTH', True)
+    monkeypatch.setattr(sender, 'DISABLE_HDMI', True)
+    monkeypatch.setattr(sender, 'run_optional_command', fake_run)
+
+    bluetooth_disabled, hdmi_disabled = sender.apply_platform_power_saving(True, True)
+
+    assert bluetooth_disabled is True
+    assert hdmi_disabled is True
+    assert calls == []

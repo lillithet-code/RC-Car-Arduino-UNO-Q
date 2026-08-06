@@ -88,6 +88,8 @@ Raspberry Pi 4B + Pi Camera 3 variables:
 - `CPU_GOVERNOR_CONTROL_ENABLED`: set `1` to toggle CPU governor by stream assignment state (`0` disables runtime governor writes)
 - `CPU_GOVERNOR_ACTIVE`: governor requested when stream is assigned and enabled (default `ondemand`)
 - `CPU_GOVERNOR_IDLE`: governor requested when stream is unassigned and camera pipeline is idle (default `powersave`)
+- `DISABLE_BLUETOOTH`: set `1` to block Bluetooth during idle operation via `rfkill` (default `1`)
+- `DISABLE_HDMI`: set `1` to turn HDMI output off during idle operation via `vcgencmd display_power 0` (default `1`)
 - `PICAMERA_PROFILE`: optional H.264 profile passed to Pi camera app (default `baseline`)
 - `PICAMERA_LEVEL`: optional H.264 level passed to Pi camera app (default empty; set only if your Pi camera build supports it)
 - `PICAMERA_SENSOR`: optional sensor hint for auto camera selection (for example `imx219` or `imx708`; default `auto`)
@@ -126,9 +128,10 @@ Switching between Camera Module 3 (IMX708) and IMX219:
 ## Idle power behavior (Raspberry Pi 4B)
 - Stream enable is now session-scoped: camera publishing runs only while a board has an active session.
 - AVAILABLE state (no active session): command WebSocket stays connected, stream sender stays alive, camera/ffmpeg remain stopped after grace period, and CPU governor can drop to `powersave`.
+- AVAILABLE state also retries Bluetooth block and HDMI-off commands until they succeed.
 - ASSIGNED state (active session): stream sender raises CPU governor (default `ondemand`) and starts camera + RTSP publish pipeline.
 - Expected UX impact: the first stream frames after assignment can take about 1 to 2 seconds as the camera pipeline starts.
-- Optional host-level savings for dedicated headless cars: disable Bluetooth and HDMI output when not needed.
+- The Raspberry Pi stream unit runs as `root` so governor writes, `rfkill`, and `vcgencmd` work under systemd; the command unit remains on the configured board user.
 
 Per-car path format:
 - RTSP publish: `rtsp://server:8554/cars/<board_name>`

@@ -39,6 +39,8 @@ PUBLISH_BACKOFF_MAX_SECONDS = max(PUBLISH_BACKOFF_BASE_SECONDS, float(os.environ
 CPU_GOVERNOR_CONTROL_ENABLED = os.environ.get('CPU_GOVERNOR_CONTROL_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 CPU_GOVERNOR_ACTIVE = (os.environ.get('CPU_GOVERNOR_ACTIVE', 'ondemand') or '').strip()
 CPU_GOVERNOR_IDLE = (os.environ.get('CPU_GOVERNOR_IDLE', 'powersave') or '').strip()
+DISABLE_BLUETOOTH = os.environ.get('DISABLE_BLUETOOTH', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
+DISABLE_HDMI = os.environ.get('DISABLE_HDMI', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 STREAM_CONFIG_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/config'
 STREAM_REPORT_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/report'
@@ -528,6 +530,46 @@ def apply_cpu_governor(target, last_applied):
     return last_applied
 
 
+def run_optional_command(command, *, success_codes=(0,), timeout=5):
+    binary = command[0]
+    if shutil.which(binary) is None:
+        return False
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        print(f'power-saving command failed command={command!r} error={exc}', file=sys.stderr)
+        return False
+
+    if result.returncode in success_codes:
+        return True
+
+    stderr_text = (result.stderr or '').strip()
+    stdout_text = (result.stdout or '').strip()
+    detail = stderr_text or stdout_text or f'returncode={result.returncode}'
+    print(f'power-saving command failed command={command!r} detail={detail}', file=sys.stderr)
+    return False
+
+
+def apply_platform_power_saving(bluetooth_disabled, hdmi_disabled):
+    if DISABLE_BLUETOOTH and not bluetooth_disabled:
+        bluetooth_disabled = run_optional_command(['rfkill', 'block', 'bluetooth'])
+        if bluetooth_disabled:
+            print('bluetooth blocked for idle power saving')
+
+    if DISABLE_HDMI and not hdmi_disabled:
+        hdmi_disabled = run_optional_command(['vcgencmd', 'display_power', '0'])
+        if hdmi_disabled:
+            print('hdmi output disabled for idle power saving')
+
+    return bluetooth_disabled, hdmi_disabled
+
+
 def main():
     if not BOARD_TOKEN or BOARD_TOKEN == 'dev-board-token':
         raise SystemExit('BOARD_TOKEN must be configured with a non-default value')
@@ -546,6 +588,8 @@ def main():
     bytes_last = 0
     bytes_last_change_at = None
     active_governor = None
+    bluetooth_disabled = False
+    hdmi_disabled = False
 
     while True:
         config = fetch_stream_config()
@@ -578,6 +622,10 @@ def main():
                     bytes_last_change_at = None
 
             active_governor = apply_cpu_governor(CPU_GOVERNOR_IDLE, active_governor)
+            bluetooth_disabled, hdmi_disabled = apply_platform_power_saving(
+                bluetooth_disabled,
+                hdmi_disabled,
+            )
             state = 'idle' if publisher is None else 'draining'
             print(
                 f'stream_state={state} enabled=0 '
