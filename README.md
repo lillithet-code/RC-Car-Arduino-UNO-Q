@@ -84,6 +84,10 @@ python3 rpi4b_board_commands.py
 Raspberry Pi 4B + Pi Camera 3 variables:
 - `FRAME_RATE`: Pi camera stream frame rate (default `60`, aligned with tether-rally profile)
 - `PICAMERA_BITRATE`: H.264 bitrate for Pi camera app (default `2000000`, aligned with tether-rally profile)
+- `STREAM_IDLE_POLL_SECONDS`: stream-config poll interval while no user session is assigned (default `2.0`)
+- `CPU_GOVERNOR_CONTROL_ENABLED`: set `1` to toggle CPU governor by stream assignment state (`0` disables runtime governor writes)
+- `CPU_GOVERNOR_ACTIVE`: governor requested when stream is assigned and enabled (default `ondemand`)
+- `CPU_GOVERNOR_IDLE`: governor requested when stream is unassigned and camera pipeline is idle (default `powersave`)
 - `PICAMERA_PROFILE`: optional H.264 profile passed to Pi camera app (default `baseline`)
 - `PICAMERA_LEVEL`: optional H.264 level passed to Pi camera app (default empty; set only if your Pi camera build supports it)
 - `PICAMERA_SENSOR`: optional sensor hint for auto camera selection (for example `imx219` or `imx708`; default `auto`)
@@ -115,6 +119,16 @@ Switching between Camera Module 3 (IMX708) and IMX219:
 - `MEDIAMTX_RTSP_BASE`: RTSP publish base, e.g. `rtsp://server:8554`
 - `MEDIAMTX_WHEP_BASE`: public same-origin base, e.g. `https://drive.kbob.org`
 - `MEDIAMTX_STREAM_PREFIX`: path prefix, defaults to `cars`
+- `COMMAND_WS_SLEEP_DRIVING_SECONDS`: board command WebSocket send cadence while throttle is active (default `0.12`)
+- `COMMAND_WS_SLEEP_ASSIGNED_IDLE_SECONDS`: command send cadence while session is assigned but car is stopped (default `0.35`)
+- `COMMAND_WS_SLEEP_UNASSIGNED_SECONDS`: command keepalive cadence while no active session owns the car (default `2.0`)
+
+## Idle power behavior (Raspberry Pi 4B)
+- Stream enable is now session-scoped: camera publishing runs only while a board has an active session.
+- AVAILABLE state (no active session): command WebSocket stays connected, stream sender stays alive, camera/ffmpeg remain stopped after grace period, and CPU governor can drop to `powersave`.
+- ASSIGNED state (active session): stream sender raises CPU governor (default `ondemand`) and starts camera + RTSP publish pipeline.
+- Expected UX impact: the first stream frames after assignment can take about 1 to 2 seconds as the camera pipeline starts.
+- Optional host-level savings for dedicated headless cars: disable Bluetooth and HDMI output when not needed.
 
 Per-car path format:
 - RTSP publish: `rtsp://server:8554/cars/<board_name>`

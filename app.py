@@ -88,6 +88,28 @@ def parse_mediamtx_path_payload(payload):
     }
 
 
+def resolve_command_ws_sleep_seconds(
+    has_active_session,
+    payload,
+    *,
+    driving_seconds,
+    assigned_idle_seconds,
+    unassigned_seconds,
+):
+    if not has_active_session:
+        return float(unassigned_seconds)
+
+    stop = bool((payload or {}).get('stop', True))
+    try:
+        throttle = float((payload or {}).get('throttle', 0.0))
+    except (TypeError, ValueError):
+        throttle = 0.0
+
+    if not stop and abs(throttle) > 1e-3:
+        return float(driving_seconds)
+    return float(assigned_idle_seconds)
+
+
 def create_app(test_config=None):
     app = Flask(__name__)
     sock = Sock(app)
@@ -114,6 +136,18 @@ def create_app(test_config=None):
     app.config['COMMAND_EXPIRES_MAX_MS'] = max(
         app.config['COMMAND_EXPIRES_DEFAULT_MS'],
         int(os.environ.get('COMMAND_EXPIRES_MAX_MS', '1200')),
+    )
+    app.config['COMMAND_WS_SLEEP_DRIVING_SECONDS'] = max(
+        0.05,
+        float(os.environ.get('COMMAND_WS_SLEEP_DRIVING_SECONDS', '0.12')),
+    )
+    app.config['COMMAND_WS_SLEEP_ASSIGNED_IDLE_SECONDS'] = max(
+        app.config['COMMAND_WS_SLEEP_DRIVING_SECONDS'],
+        float(os.environ.get('COMMAND_WS_SLEEP_ASSIGNED_IDLE_SECONDS', '0.35')),
+    )
+    app.config['COMMAND_WS_SLEEP_UNASSIGNED_SECONDS'] = max(
+        app.config['COMMAND_WS_SLEEP_ASSIGNED_IDLE_SECONDS'],
+        float(os.environ.get('COMMAND_WS_SLEEP_UNASSIGNED_SECONDS', '2.0')),
     )
     app.config['MEDIAMTX_RTSP_BASE'] = os.environ.get('MEDIAMTX_RTSP_BASE', '').strip().rstrip('/')
     app.config['MEDIAMTX_WHEP_BASE'] = os.environ.get('MEDIAMTX_WHEP_BASE', '').strip().rstrip('/')
@@ -930,6 +964,23 @@ def create_app(test_config=None):
         row = db.execute("SELECT 1 FROM devices WHERE status IN ('available', 'in_use') LIMIT 1").fetchone()
         return row is not None
 
+    def board_has_active_session(board_name, db=None):
+        if not board_name:
+            return False
+        if db is None:
+            db = get_db()
+        row = db.execute(
+            """
+            SELECT 1
+            FROM sessions s
+            JOIN devices d ON d.id = s.device_id
+            WHERE s.status = 'active' AND d.name = ?
+            LIMIT 1
+            """,
+            (board_name,),
+        ).fetchone()
+        return row is not None
+
     def poll_board_loop():
         poll_url = app.config['BOARD_POLL_URL']
         interval = app.config['BOARD_POLL_INTERVAL_SECONDS']
@@ -1494,7 +1545,15 @@ def create_app(test_config=None):
                 break
             except Exception:
                 break
-            time.sleep(0.12)
+
+            sleep_seconds = resolve_command_ws_sleep_seconds(
+                board_has_active_session(board_name),
+                payload,
+                driving_seconds=app.config['COMMAND_WS_SLEEP_DRIVING_SECONDS'],
+                assigned_idle_seconds=app.config['COMMAND_WS_SLEEP_ASSIGNED_IDLE_SECONDS'],
+                unassigned_seconds=app.config['COMMAND_WS_SLEEP_UNASSIGNED_SECONDS'],
+            )
+            time.sleep(sleep_seconds)
 
     @app.route('/api/board/command')
     def board_command():
@@ -1597,8 +1656,7 @@ def create_app(test_config=None):
                 ''',
                 (board_name,),
             ).fetchone()
-            device_online = bool(device_row and is_device_online(dict(device_row), datetime.now(timezone.utc)))
-            enabled = bool(active_row is not None or (device_row is not None and device_online))
+            enabled = bool(active_row is not None)
             stream_urls = build_stream_urls(board_name)
             if device_row:
                 preferred_profile['h264_encoder'] = (device_row['preferred_h264_encoder'] or 'libx264').strip() or 'libx264'

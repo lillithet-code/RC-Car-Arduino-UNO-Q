@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from glob import glob
 from dataclasses import dataclass
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -18,6 +19,7 @@ BOARD_NAME = os.environ.get('BOARD_NAME', socket.gethostname() or 'rc-car-rpi')
 BOARD_LOCATION = os.environ.get('BOARD_LOCATION', 'unknown')
 STREAM_STATUS_POLL_SECONDS = max(0.3, float(os.environ.get('STREAM_STATUS_POLL_SECONDS', '1.0')))
 STREAM_DISABLE_GRACE_SECONDS = max(0.0, float(os.environ.get('STREAM_DISABLE_GRACE_SECONDS', '8.0')))
+STREAM_IDLE_POLL_SECONDS = max(STREAM_STATUS_POLL_SECONDS, float(os.environ.get('STREAM_IDLE_POLL_SECONDS', '2.0')))
 FRAME_RATE = float(os.environ.get('FRAME_RATE', '30'))
 VIDEO_WIDTH = int(os.environ.get('VIDEO_WIDTH', '1280'))
 VIDEO_HEIGHT = int(os.environ.get('VIDEO_HEIGHT', '720'))
@@ -34,6 +36,9 @@ CAMERA_DISCOVERY_CACHE_SECONDS = max(2.0, float(os.environ.get('CAMERA_DISCOVERY
 PUBLISH_READY_CONFIRM_SECONDS = max(1.0, float(os.environ.get('PUBLISH_READY_CONFIRM_SECONDS', '2.0')))
 PUBLISH_BACKOFF_BASE_SECONDS = max(0.5, float(os.environ.get('PUBLISH_BACKOFF_BASE_SECONDS', '1.0')))
 PUBLISH_BACKOFF_MAX_SECONDS = max(PUBLISH_BACKOFF_BASE_SECONDS, float(os.environ.get('PUBLISH_BACKOFF_MAX_SECONDS', '20.0')))
+CPU_GOVERNOR_CONTROL_ENABLED = os.environ.get('CPU_GOVERNOR_CONTROL_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
+CPU_GOVERNOR_ACTIVE = (os.environ.get('CPU_GOVERNOR_ACTIVE', 'ondemand') or '').strip()
+CPU_GOVERNOR_IDLE = (os.environ.get('CPU_GOVERNOR_IDLE', 'powersave') or '').strip()
 
 STREAM_CONFIG_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/config'
 STREAM_REPORT_ENDPOINT = f'{SERVER_BASE_URL}/api/board/stream/report'
@@ -484,6 +489,45 @@ def publisher_snapshot(publisher):
     }
 
 
+def apply_cpu_governor(target, last_applied):
+    desired = (target or '').strip()
+    if not CPU_GOVERNOR_CONTROL_ENABLED or not desired:
+        return last_applied
+    if desired == last_applied:
+        return last_applied
+
+    governor_paths = sorted(glob('/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor'))
+    if not governor_paths:
+        return last_applied
+
+    applied = 0
+    failed = 0
+    for path in governor_paths:
+        try:
+            current_value = ''
+            try:
+                with open(path, 'r', encoding='utf-8') as handle:
+                    current_value = (handle.read() or '').strip()
+            except Exception:
+                current_value = ''
+
+            if current_value == desired:
+                applied += 1
+                continue
+
+            with open(path, 'w', encoding='utf-8') as handle:
+                handle.write(desired)
+            applied += 1
+        except Exception as exc:
+            failed += 1
+            print(f'cpu governor apply failed path={path} target={desired} error={exc}', file=sys.stderr)
+
+    if applied > 0 and failed == 0:
+        print(f'cpu governor set target={desired} cpus={applied}')
+        return desired
+    return last_applied
+
+
 def main():
     if not BOARD_TOKEN or BOARD_TOKEN == 'dev-board-token':
         raise SystemExit('BOARD_TOKEN must be configured with a non-default value')
@@ -501,6 +545,7 @@ def main():
     restart_attempt = 0
     bytes_last = 0
     bytes_last_change_at = None
+    active_governor = None
 
     while True:
         config = fetch_stream_config()
@@ -516,6 +561,40 @@ def main():
         stream_enabled = bool(config.get('enabled'))
         publish_url = PUBLISH_RTSP_URL or (config.get('rtsp_url') or '').strip()
 
+        if stream_enabled:
+            stream_disabled_since = None
+        elif stream_disabled_since is None:
+            stream_disabled_since = time.monotonic()
+
+        if not stream_enabled:
+            if publisher is not None and stream_disabled_since is not None:
+                if (time.monotonic() - stream_disabled_since) >= STREAM_DISABLE_GRACE_SECONDS:
+                    stop_publisher(publisher, 'disabled')
+                    publisher = None
+                    active_publish_url = None
+                    active_mode = None
+                    restart_attempt = 0
+                    bytes_last = 0
+                    bytes_last_change_at = None
+
+            active_governor = apply_cpu_governor(CPU_GOVERNOR_IDLE, active_governor)
+            state = 'idle' if publisher is None else 'draining'
+            print(
+                f'stream_state={state} enabled=0 '
+                f'live={int(bool(config.get("stream_live")))} ready={int(bool(config.get("stream_ready")))} '
+                f'bytes={int(config.get("mediamtx_bytes_received") or 0)}'
+            )
+            time.sleep(STREAM_IDLE_POLL_SECONDS)
+            continue
+
+        active_governor = apply_cpu_governor(CPU_GOVERNOR_ACTIVE, active_governor)
+
+        if not publish_url:
+            state = 'waiting-config'
+            print('stream_state=waiting-config enabled=1 missing_rtsp_url=1', file=sys.stderr)
+            time.sleep(STREAM_STATUS_POLL_SECONDS)
+            continue
+
         cameras = discover_cameras()
         sensor_hint = discover_sensor_hint(cameras)
         selected_camera = resolve_selected_camera(cameras, sensor_hint)
@@ -526,11 +605,6 @@ def main():
         url_changed = active_publish_url != publish_url
 
         available_modes = list(selected_camera.modes) if selected_camera and selected_camera.modes else [desired_mode]
-
-        if stream_enabled:
-            stream_disabled_since = None
-        elif stream_disabled_since is None:
-            stream_disabled_since = time.monotonic()
 
         if stream_enabled and publish_url:
             if publisher is None or mode_changed or url_changed:
@@ -579,15 +653,6 @@ def main():
 
             if active_mode is not None:
                 report_stream_state(active_mode, available_modes, available_encoders)
-        else:
-            if publisher is not None and stream_disabled_since is not None:
-                if (time.monotonic() - stream_disabled_since) >= STREAM_DISABLE_GRACE_SECONDS:
-                    stop_publisher(publisher, 'disabled')
-                    publisher = None
-                    active_publish_url = None
-                    active_mode = None
-                    state = 'detecting'
-
         print(
             f'stream_state={state} enabled={int(stream_enabled)} '
             f'live={int(bool(config.get("stream_live")))} ready={int(bool(config.get("stream_ready")))} '

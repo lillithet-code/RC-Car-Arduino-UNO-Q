@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import uno_q_board_commands as board_commands
-from app import create_app
+from app import create_app, resolve_command_ws_sleep_seconds
 
 
 @pytest.fixture()
@@ -61,6 +61,39 @@ def set_mediamtx_state(
         'tracks': [{'codec': 'H264'}] if has_h264 else [{'codec': 'VP8'}],
         'error': None if reachable else 'override unreachable',
     }
+
+
+def test_command_ws_sleep_uses_unassigned_interval_without_session():
+    sleep_seconds = resolve_command_ws_sleep_seconds(
+        False,
+        {'stop': False, 'throttle': 1.0},
+        driving_seconds=0.12,
+        assigned_idle_seconds=0.35,
+        unassigned_seconds=2.0,
+    )
+    assert sleep_seconds == 2.0
+
+
+def test_command_ws_sleep_uses_driving_interval_when_moving():
+    sleep_seconds = resolve_command_ws_sleep_seconds(
+        True,
+        {'stop': False, 'throttle': 0.5},
+        driving_seconds=0.12,
+        assigned_idle_seconds=0.35,
+        unassigned_seconds=2.0,
+    )
+    assert sleep_seconds == 0.12
+
+
+def test_command_ws_sleep_uses_assigned_idle_interval_when_stopped():
+    sleep_seconds = resolve_command_ws_sleep_seconds(
+        True,
+        {'stop': True, 'throttle': 0.0},
+        driving_seconds=0.12,
+        assigned_idle_seconds=0.35,
+        unassigned_seconds=2.0,
+    )
+    assert sleep_seconds == 0.35
 
 
 def test_register_and_login(client):
@@ -857,7 +890,7 @@ def test_stream_lost_overwrites_motion_with_stop(client):
     assert board_state['throttle'] == 0.0
 
 
-def test_board_stream_status_enables_registered_online_boards(client):
+def test_board_stream_status_keeps_unassigned_online_boards_disabled(client):
     client.post('/register', data={
         'username': 'ivy',
         'password': 'secret123',
@@ -878,7 +911,7 @@ def test_board_stream_status_enables_registered_online_boards(client):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload['status'] == 'ok'
-    assert payload['enabled'] is True
+    assert payload['enabled'] is False
     assert 'board_active' in payload
 
 

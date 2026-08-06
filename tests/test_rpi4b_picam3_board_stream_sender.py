@@ -79,3 +79,30 @@ def test_resolve_requested_mode_uses_server_override():
     assert mode.width == 960
     assert mode.height == 540
     assert mode.fps == 24.0
+
+
+def test_apply_cpu_governor_updates_all_cpu_paths(monkeypatch, tmp_path):
+    cpu0 = tmp_path / 'cpu0_governor'
+    cpu1 = tmp_path / 'cpu1_governor'
+    cpu0.write_text('ondemand', encoding='utf-8')
+    cpu1.write_text('ondemand', encoding='utf-8')
+
+    monkeypatch.setattr(sender, 'CPU_GOVERNOR_CONTROL_ENABLED', True)
+    monkeypatch.setattr(sender, 'glob', lambda pattern: [str(cpu0), str(cpu1)])
+
+    applied = sender.apply_cpu_governor('powersave', None)
+    assert applied == 'powersave'
+    assert cpu0.read_text(encoding='utf-8') == 'powersave'
+    assert cpu1.read_text(encoding='utf-8') == 'powersave'
+
+
+def test_apply_cpu_governor_noops_when_disabled(monkeypatch, tmp_path):
+    cpu0 = tmp_path / 'cpu0_governor'
+    cpu0.write_text('ondemand', encoding='utf-8')
+
+    monkeypatch.setattr(sender, 'CPU_GOVERNOR_CONTROL_ENABLED', False)
+    monkeypatch.setattr(sender, 'glob', lambda pattern: [str(cpu0)])
+
+    applied = sender.apply_cpu_governor('powersave', None)
+    assert applied is None
+    assert cpu0.read_text(encoding='utf-8') == 'ondemand'
