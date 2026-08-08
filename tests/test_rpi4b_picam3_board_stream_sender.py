@@ -81,6 +81,20 @@ def test_resolve_requested_mode_uses_server_override():
     assert mode.fps == 24.0
 
 
+def test_parse_camera_modes_supports_rpicam_format_lines():
+    lines = [
+        "    'SRGGB10_CSI2P' : 1536x864 [120.13 fps - (1536, 864)/4608x2592 crop]",
+        "                       2304x1296 [56.03 fps - (2304, 1296)/4608x2592 crop]",
+        "                       4608x2592 [14.35 fps - (0, 0)/4608x2592 crop]",
+    ]
+
+    modes = sender._parse_camera_modes(lines)
+    assert len(modes) == 3
+    assert modes[0] == sender.CameraMode(input_format='srggb10_csi2p', width=1536, height=864, fps=120.13)
+    assert modes[1] == sender.CameraMode(input_format='srggb10_csi2p', width=2304, height=1296, fps=56.03)
+    assert modes[2] == sender.CameraMode(input_format='srggb10_csi2p', width=4608, height=2592, fps=14.35)
+
+
 def test_apply_cpu_governor_updates_all_cpu_paths(monkeypatch, tmp_path):
     cpu0 = tmp_path / 'cpu0_governor'
     cpu1 = tmp_path / 'cpu1_governor'

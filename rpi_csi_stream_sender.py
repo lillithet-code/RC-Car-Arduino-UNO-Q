@@ -135,24 +135,45 @@ def _mode_distance(requested_mode, candidate_mode):
 
 
 def _parse_camera_modes(lines):
-    mode_pattern = re.compile(r'([A-Za-z0-9_]+)\s+(\d+)x(\d+)\s*\[(\d+(?:\.\d+)?)\s*fps\]')
+    # Supports both compact lines and rpicam-vid style rows like:
+    #   'SRGGB10_CSI2P' : 1536x864 [120.13 fps - (...)]
+    #   2304x1296 [56.03 fps - (...)]
+    mode_pattern = re.compile(
+        r"(?:'?(?P<fmt>[A-Za-z0-9_]+)'?\s*:\s*)?"
+        r'(?P<width>\d+)x(?P<height>\d+)\s*'
+        r'\[(?P<fps>\d+(?:\.\d+)?)\s*fps'
+    )
     modes = []
+    last_format = None
     for raw_line in lines:
         match = mode_pattern.search(raw_line.strip())
         if not match:
             continue
-        width = int(match.group(2))
-        height = int(match.group(3))
-        fps = float(match.group(4))
+        width = int(match.group('width'))
+        height = int(match.group('height'))
+        fps = float(match.group('fps'))
         if width <= 0 or height <= 0 or fps <= 0:
             continue
+        current_format = (match.group('fmt') or '').strip().lower()
+        if current_format:
+            last_format = current_format
+        input_format = last_format or 'h264'
         modes.append(CameraMode(
-            input_format=match.group(1).strip().lower(),
+            input_format=input_format,
             width=width,
             height=height,
             fps=fps,
         ))
-    return tuple(modes)
+    # Keep order stable while dropping duplicates.
+    deduped = []
+    seen = set()
+    for mode in modes:
+        key = (mode.input_format, mode.width, mode.height, mode.fps)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(mode)
+    return tuple(deduped)
 
 
 def _query_list_cameras():
