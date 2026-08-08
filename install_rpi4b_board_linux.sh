@@ -313,7 +313,7 @@ RestartSec=2
 User=$BOARD_RUN_USER
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=true
+ProtectHome=false
 
 [Install]
 WantedBy=multi-user.target
