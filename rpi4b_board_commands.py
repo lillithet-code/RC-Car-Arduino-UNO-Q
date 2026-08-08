@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import socket
+import threading
 import time
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -26,9 +27,8 @@ def normalize_gpiozero_pin_factory(env=None):
 normalize_gpiozero_pin_factory()
 
 try:
-    from gpiozero import AngularServo, DigitalOutputDevice, PWMOutputDevice
+    from gpiozero import DigitalOutputDevice, PWMOutputDevice
 except Exception:  # pragma: no cover - runtime environment dependent
-    AngularServo = None
     DigitalOutputDevice = None
     PWMOutputDevice = None
 
@@ -51,9 +51,9 @@ COMMAND_WS_RETRY_SECONDS = float(os.environ.get('COMMAND_WS_RETRY_SECONDS', '1.0
 MOTOR_WATCHDOG_MS = max(300, int(os.environ.get('MOTOR_WATCHDOG_MS', '500')))
 GPIO_DRY_RUN = os.environ.get('GPIO_DRY_RUN', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 
-DRIVE_IN1_PIN = int(os.environ.get('DRIVE_IN1_PIN', '17'))
-DRIVE_IN2_PIN = int(os.environ.get('DRIVE_IN2_PIN', '27'))
-SERVO_PIN = int(os.environ.get('SERVO_PIN', '12'))
+DRIVE_IN1_PIN = int(os.environ.get('DRIVE_IN1_PIN', '12'))
+DRIVE_IN2_PIN = int(os.environ.get('DRIVE_IN2_PIN', '13'))
+SERVO_PIN = int(os.environ.get('SERVO_PIN', '6'))
 SERVO_LEFT_ANGLE = float(os.environ.get('SERVO_LEFT_ANGLE', '-30'))
 SERVO_CENTER_ANGLE = float(os.environ.get('SERVO_CENTER_ANGLE', '0'))
 SERVO_RIGHT_ANGLE = float(os.environ.get('SERVO_RIGHT_ANGLE', '30'))
@@ -64,8 +64,71 @@ SERVO_MAX_PULSE_WIDTH = float(os.environ.get('SERVO_MAX_PULSE_WIDTH', '0.0025'))
 SERVO_FRAME_WIDTH = float(os.environ.get('SERVO_FRAME_WIDTH', '0.02'))
 FORWARD_THROTTLE = max(0.0, min(1.0, float(os.environ.get('FORWARD_THROTTLE', '0.65'))))
 BACK_THROTTLE = max(0.0, min(1.0, float(os.environ.get('BACK_THROTTLE', '0.5'))))
-LIGHTS_PIN = int(os.environ.get('LIGHTS_PIN', '24'))
+LIGHTS_PIN = int(os.environ.get('LIGHTS_PIN', '5'))
 GPIO_ACTIVE_HIGH = os.environ.get('GPIO_ACTIVE_HIGH', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
+
+
+class SoftwareServoPWM:
+    def __init__(
+        self,
+        pin,
+        min_angle,
+        max_angle,
+        min_pulse_width,
+        max_pulse_width,
+        frame_width,
+        active_high=True,
+    ):
+        self._device = DigitalOutputDevice(pin, active_high=active_high, initial_value=False)
+        self._min_angle = float(min_angle)
+        self._max_angle = float(max_angle)
+        self._min_pulse_width = float(min_pulse_width)
+        self._max_pulse_width = float(max_pulse_width)
+        self._frame_width = max(float(frame_width), self._max_pulse_width + 0.001)
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+
+        midpoint = (self._min_pulse_width + self._max_pulse_width) * 0.5
+        self._pulse_width = midpoint
+
+        self._thread = threading.Thread(target=self._run, name='software-servo-pwm', daemon=True)
+        self._thread.start()
+
+    def _angle_to_pulse_width(self, angle):
+        clamped_angle = max(self._min_angle, min(self._max_angle, float(angle)))
+        span = self._max_angle - self._min_angle
+        if span <= 0:
+            return (self._min_pulse_width + self._max_pulse_width) * 0.5
+        ratio = (clamped_angle - self._min_angle) / span
+        return self._min_pulse_width + ((self._max_pulse_width - self._min_pulse_width) * ratio)
+
+    @property
+    def angle(self):
+        with self._lock:
+            return self._pulse_width
+
+    @angle.setter
+    def angle(self, value):
+        pulse_width = self._angle_to_pulse_width(value)
+        with self._lock:
+            self._pulse_width = pulse_width
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            with self._lock:
+                high_time = self._pulse_width
+            low_time = max(0.0, self._frame_width - high_time)
+
+            self._device.on()
+            time.sleep(high_time)
+            self._device.off()
+            time.sleep(low_time)
+
+    def close(self):
+        self._stop_event.set()
+        self._thread.join(timeout=self._frame_width * 2)
+        self._device.off()
+        self._device.close()
 
 
 class CarGPIODriver:
@@ -80,7 +143,7 @@ class CarGPIODriver:
             print('GPIO dry-run enabled; commands will be logged only')
             return
 
-        if DigitalOutputDevice is None or PWMOutputDevice is None or AngularServo is None:
+        if DigitalOutputDevice is None or PWMOutputDevice is None:
             raise RuntimeError('gpiozero is required on Raspberry Pi (or set GPIO_DRY_RUN=1 for testing)')
 
         self._devices = {
@@ -89,20 +152,21 @@ class CarGPIODriver:
             'lights': DigitalOutputDevice(LIGHTS_PIN, active_high=GPIO_ACTIVE_HIGH, initial_value=False),
         }
         try:
-            self._servo = AngularServo(
+            self._servo = SoftwareServoPWM(
                 SERVO_PIN,
                 min_angle=SERVO_MIN_ANGLE,
                 max_angle=SERVO_MAX_ANGLE,
                 min_pulse_width=SERVO_MIN_PULSE_WIDTH,
                 max_pulse_width=SERVO_MAX_PULSE_WIDTH,
                 frame_width=SERVO_FRAME_WIDTH,
+                active_high=GPIO_ACTIVE_HIGH,
             )
             self._servo.angle = SERVO_CENTER_ANGLE
-        except PinPWMUnsupported:
+        except Exception as exc:
             self._servo = None
             print(
-                f'warning: PWM not supported on GPIO{SERVO_PIN} for servo steering; '
-                'continuing without servo output. Install a PWM-capable pin factory (lgpio/pigpio) or adjust SERVO_PIN.'
+                f'warning: software PWM servo setup failed on GPIO{SERVO_PIN}: {exc}; '
+                'continuing without servo output.'
             )
 
     def _build_drive_output(self, name, pin):
