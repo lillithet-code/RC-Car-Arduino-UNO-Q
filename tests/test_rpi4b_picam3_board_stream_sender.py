@@ -95,6 +95,41 @@ def test_parse_camera_modes_supports_rpicam_format_lines():
     assert modes[2] == sender.CameraMode(input_format='srggb10_csi2p', width=4608, height=2592, fps=14.35)
 
 
+def test_select_best_mode_keeps_requested_when_size_not_present():
+    requested = sender.CameraMode(input_format='h264', width=1280, height=720, fps=30.0)
+    camera = sender.CameraDescriptor(
+        index=0,
+        description='imx708 sample',
+        modes=(
+            sender.CameraMode(input_format='srggb10_csi2p', width=1536, height=864, fps=120.13),
+            sender.CameraMode(input_format='srggb10_csi2p', width=2304, height=1296, fps=56.03),
+        ),
+    )
+
+    selected = sender.select_best_mode(requested, camera)
+    assert selected == requested
+
+
+def test_build_reported_modes_includes_common_and_camera_modes():
+    requested = sender.CameraMode(input_format='h264', width=1280, height=720, fps=30.0)
+    camera = sender.CameraDescriptor(
+        index=0,
+        description='imx708 sample',
+        modes=(
+            sender.CameraMode(input_format='srggb10_csi2p', width=1536, height=864, fps=120.13),
+            sender.CameraMode(input_format='srggb10_csi2p', width=2304, height=1296, fps=56.03),
+        ),
+    )
+
+    modes = sender.build_reported_modes(camera, requested)
+    values = {(mode.width, mode.height, round(mode.fps, 2), mode.input_format) for mode in modes}
+
+    assert (1280, 720, 30.0, 'h264') in values
+    assert (1920, 1080, 30.0, 'h264') in values
+    assert (1536, 864, 120.13, 'h264') in values
+    assert (2304, 1296, 56.03, 'h264') in values
+
+
 def test_apply_cpu_governor_updates_all_cpu_paths(monkeypatch, tmp_path):
     cpu0 = tmp_path / 'cpu0_governor'
     cpu1 = tmp_path / 'cpu1_governor'

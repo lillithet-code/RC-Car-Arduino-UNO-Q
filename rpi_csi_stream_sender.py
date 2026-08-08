@@ -74,6 +74,17 @@ class CameraDescriptor:
     modes: tuple
 
 
+COMMON_H264_MODES = (
+    CameraMode(input_format='h264', width=640, height=480, fps=30.0),
+    CameraMode(input_format='h264', width=960, height=540, fps=30.0),
+    CameraMode(input_format='h264', width=1280, height=720, fps=30.0),
+    CameraMode(input_format='h264', width=1280, height=720, fps=60.0),
+    CameraMode(input_format='h264', width=1920, height=1080, fps=30.0),
+    CameraMode(input_format='h264', width=2304, height=1296, fps=30.0),
+    CameraMode(input_format='h264', width=4608, height=2592, fps=14.0),
+)
+
+
 _CAMERA_DISCOVERY_CACHE = {
     'loaded_at': 0.0,
     'cameras': tuple(),
@@ -134,6 +145,18 @@ def _mode_distance(requested_mode, candidate_mode):
     return (width_delta * 10000) + (height_delta * 100) + fps_delta
 
 
+def _dedupe_modes(modes):
+    deduped = []
+    seen = set()
+    for mode in modes:
+        key = (mode.input_format, mode.width, mode.height, round(float(mode.fps), 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(mode)
+    return deduped
+
+
 def _parse_camera_modes(lines):
     # Supports both compact lines and rpicam-vid style rows like:
     #   'SRGGB10_CSI2P' : 1536x864 [120.13 fps - (...)]
@@ -164,16 +187,7 @@ def _parse_camera_modes(lines):
             height=height,
             fps=fps,
         ))
-    # Keep order stable while dropping duplicates.
-    deduped = []
-    seen = set()
-    for mode in modes:
-        key = (mode.input_format, mode.width, mode.height, mode.fps)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(mode)
-    return tuple(deduped)
+    return tuple(_dedupe_modes(modes))
 
 
 def _query_list_cameras():
@@ -294,10 +308,41 @@ def resolve_requested_mode(config_payload):
 def select_best_mode(requested_mode, camera):
     if camera is None or not camera.modes:
         return requested_mode
-    compatible = [mode for mode in camera.modes if mode.input_format in {'h264', 'yuv420', 'rgb'}]
-    if not compatible:
-        compatible = list(camera.modes)
-    return min(compatible, key=lambda mode: _mode_distance(requested_mode, mode))
+
+    # Prefer keeping the requested size and only adapt fps if that exact size exists.
+    same_size = [
+        mode for mode in camera.modes
+        if mode.width == requested_mode.width and mode.height == requested_mode.height
+    ]
+    if same_size:
+        return min(same_size, key=lambda mode: abs(mode.fps - requested_mode.fps))
+
+    return requested_mode
+
+
+def build_reported_modes(selected_camera, requested_mode):
+    modes = list(COMMON_H264_MODES)
+
+    if selected_camera and selected_camera.modes:
+        for mode in selected_camera.modes:
+            modes.append(CameraMode(
+                input_format='h264',
+                width=mode.width,
+                height=mode.height,
+                fps=mode.fps,
+            ))
+
+    if requested_mode is not None:
+        modes.append(CameraMode(
+            input_format='h264',
+            width=requested_mode.width,
+            height=requested_mode.height,
+            fps=requested_mode.fps,
+        ))
+
+    deduped = _dedupe_modes(modes)
+    deduped.sort(key=lambda mode: (mode.width * mode.height, mode.width, mode.height, mode.fps))
+    return deduped
 
 
 def register_device():
@@ -673,7 +718,7 @@ def main():
         mode_changed = active_mode != desired_mode
         url_changed = active_publish_url != publish_url
 
-        available_modes = list(selected_camera.modes) if selected_camera and selected_camera.modes else [desired_mode]
+        available_modes = build_reported_modes(selected_camera, requested_mode)
 
         if stream_enabled and publish_url:
             if publisher is None or mode_changed or url_changed:
