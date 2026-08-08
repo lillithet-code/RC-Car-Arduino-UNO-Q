@@ -350,6 +350,22 @@ def create_app(test_config=None):
             return None
         return f"{mode['input_format']},{mode['width']},{mode['height']},{mode['fps']:g}"
 
+    def normalize_encoder_values(values):
+        if not isinstance(values, list):
+            return []
+        seen = set()
+        normalized = []
+        for value in values:
+            item = str(value).strip()
+            if not item:
+                continue
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(item)
+        return normalized
+
     def get_user_view(user_id):
         db = get_db()
         user = db.execute('SELECT id, username, balance, is_admin FROM users WHERE id = ?', (user_id,)).fetchone()
@@ -1341,9 +1357,37 @@ def create_app(test_config=None):
                 device_id = request.form.get('device_id')
                 encoder = (request.form.get('h264_encoder') or '').strip()
                 mode_value = (request.form.get('video_mode') or '').strip()
-                allowed_encoders = {'libx264', 'h264_v4l2m2m'}
-                if encoder not in allowed_encoders:
-                    encoder = 'libx264'
+
+                device_row = db.execute(
+                    '''
+                    SELECT preferred_h264_encoder, reported_h264_encoder, available_h264_encoders_json
+                    FROM devices
+                    WHERE id = ?
+                    ''',
+                    (device_id,),
+                ).fetchone()
+
+                fallback_encoder = 'libx264'
+                available_encoder_values = []
+                if device_row:
+                    fallback_encoder = (device_row['preferred_h264_encoder'] or fallback_encoder).strip() or fallback_encoder
+                    try:
+                        available_encoder_values = json.loads(device_row['available_h264_encoders_json'] or '[]')
+                    except Exception:
+                        available_encoder_values = []
+
+                encoder_options = normalize_encoder_values(available_encoder_values)
+                if device_row:
+                    reported_encoder = (device_row['reported_h264_encoder'] or '').strip()
+                    if reported_encoder and not any(value.lower() == reported_encoder.lower() for value in encoder_options):
+                        encoder_options.append(reported_encoder)
+                    if fallback_encoder and not any(value.lower() == fallback_encoder.lower() for value in encoder_options):
+                        encoder_options.append(fallback_encoder)
+
+                if not encoder:
+                    encoder = fallback_encoder
+                elif encoder_options and not any(value.lower() == encoder.lower() for value in encoder_options):
+                    encoder = fallback_encoder
 
                 parsed_mode = parse_mode_value(mode_value)
                 normalized_mode = format_mode_value(parsed_mode)
@@ -1381,9 +1425,14 @@ def create_app(test_config=None):
                 available_encoders = json.loads(item.get('available_h264_encoders_json') or '[]')
             except Exception:
                 available_encoders = []
-            if not isinstance(available_encoders, list):
-                available_encoders = []
-            available_encoders = [str(value).strip() for value in available_encoders if str(value).strip()]
+            available_encoders = normalize_encoder_values(available_encoders)
+
+            preferred_encoder = (item.get('preferred_h264_encoder') or 'libx264').strip() or 'libx264'
+            reported_encoder = (item.get('reported_h264_encoder') or '').strip()
+            if reported_encoder and not any(value.lower() == reported_encoder.lower() for value in available_encoders):
+                available_encoders.append(reported_encoder)
+            if preferred_encoder and not any(value.lower() == preferred_encoder.lower() for value in available_encoders):
+                available_encoders.append(preferred_encoder)
 
             try:
                 available_modes = json.loads(item.get('available_video_modes_json') or '[]')
@@ -1416,9 +1465,9 @@ def create_app(test_config=None):
 
             item['available_h264_encoders'] = available_encoders
             item['available_video_modes'] = normalized_modes
-            item['preferred_h264_encoder'] = item.get('preferred_h264_encoder') or 'libx264'
+            item['preferred_h264_encoder'] = preferred_encoder
             item['preferred_video_mode_value'] = preferred_mode_value or ''
-            item['reported_h264_encoder'] = item.get('reported_h264_encoder') or 'n/a'
+            item['reported_h264_encoder'] = reported_encoder or 'n/a'
             item['reported_video_mode'] = item.get('reported_video_mode') or 'n/a'
             devices.append(item)
 

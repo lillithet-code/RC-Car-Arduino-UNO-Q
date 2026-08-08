@@ -958,6 +958,128 @@ def test_board_status_endpoint_reports_liveness(client):
     assert 'last_source' in payload
 
 
+def test_admin_shows_all_reported_pi_stream_options(client):
+    client.post('/register', data={
+        'username': 'adminpi',
+        'password': 'secret123',
+        'email': 'adminpi@example.com'
+    })
+    client.post('/login', data={
+        'username': 'adminpi',
+        'password': 'secret123'
+    })
+
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE users SET is_admin = 1 WHERE username = 'adminpi'")
+        conn.commit()
+        conn.close()
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-pi-options',
+        'kind': 'raspberry_pi_4b_picam3',
+        'location': 'lab'
+    })
+    assert register_response.status_code == 200
+
+    report_response = client.post('/api/board/stream/report', json={
+        'board_name': 'rc-car-pi-options',
+        'current_h264_encoder': 'h264_passthrough',
+        'current_video_mode': {'input_format': 'h264', 'width': 1280, 'height': 720, 'fps': 30.0},
+        'available_h264_encoders': ['h264_passthrough', 'h264_v4l2m2m', 'libx264'],
+        'available_video_modes': [
+            {'input_format': 'h264', 'width': 1280, 'height': 720, 'fps': 30.0},
+            {'input_format': 'h264', 'width': 1920, 'height': 1080, 'fps': 25.0},
+        ],
+    })
+    assert report_response.status_code == 200
+
+    admin_response = client.get('/admin')
+    assert admin_response.status_code == 200
+    html = admin_response.data.decode('utf-8')
+    assert 'h264_passthrough' in html
+    assert 'h264_v4l2m2m' in html
+    assert 'libx264' in html
+    assert 'h264 1280x720@30' in html
+    assert 'h264 1920x1080@25' in html
+
+
+def test_admin_saves_pi_encoder_from_reported_options(client):
+    client.post('/register', data={
+        'username': 'adminsave',
+        'password': 'secret123',
+        'email': 'adminsave@example.com'
+    })
+    client.post('/login', data={
+        'username': 'adminsave',
+        'password': 'secret123'
+    })
+
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE users SET is_admin = 1 WHERE username = 'adminsave'")
+        conn.commit()
+        conn.close()
+
+    register_response = client.post('/api/devices/register', json={
+        'name': 'rc-car-pi-save',
+        'kind': 'raspberry_pi_4b_picam3',
+        'location': 'lab'
+    })
+    assert register_response.status_code == 200
+
+    report_response = client.post('/api/board/stream/report', json={
+        'board_name': 'rc-car-pi-save',
+        'current_h264_encoder': 'h264_passthrough',
+        'current_video_mode': {'input_format': 'h264', 'width': 1280, 'height': 720, 'fps': 30.0},
+        'available_h264_encoders': ['h264_passthrough', 'h264_v4l2m2m', 'libx264'],
+        'available_video_modes': [
+            {'input_format': 'h264', 'width': 1280, 'height': 720, 'fps': 30.0},
+        ],
+    })
+    assert report_response.status_code == 200
+
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        device_row = conn.execute("SELECT id FROM devices WHERE name = 'rc-car-pi-save'").fetchone()
+        assert device_row is not None
+        device_id = str(device_row['id'])
+        conn.close()
+
+    response = client.post('/admin', data={
+        'action': 'set_video_profile',
+        'device_id': device_id,
+        'h264_encoder': 'h264_passthrough',
+        'video_mode': 'h264,1280,720,30',
+    })
+    assert response.status_code == 200
+
+    with client.application.app_context():
+        database_url = client.application.config['DATABASE_URL']
+        path = database_url.replace('sqlite:///', '', 1)
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        updated_row = conn.execute(
+            "SELECT preferred_h264_encoder, preferred_video_mode FROM devices WHERE name = 'rc-car-pi-save'"
+        ).fetchone()
+        conn.close()
+
+    assert updated_row is not None
+    assert updated_row['preferred_h264_encoder'] == 'h264_passthrough'
+    assert updated_row['preferred_video_mode'] == 'h264,1280,720,30'
+
+
 def test_health_endpoint_is_public(client):
     response = client.get('/api/health')
     assert response.status_code == 200
