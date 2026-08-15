@@ -20,6 +20,15 @@ def test_normalize_gpiozero_pin_factory_falls_back_when_lgpio_missing(monkeypatc
     assert env['GPIOZERO_PIN_FACTORY'] == 'native'
 
 
+def test_ramp_throttle_reaches_full_speed_in_configured_duration():
+    assert commands.ramp_throttle(0.0, 1.0, 1.0, 5.0) == 0.2
+    assert commands.ramp_throttle(0.8, 1.0, 1.0, 5.0) == 1.0
+
+
+def test_ramp_throttle_can_be_disabled():
+    assert commands.ramp_throttle(0.0, 1.0, 0.1, 0.0) == 1.0
+
+
 def test_parse_desired_state_accepts_valid_payload():
     now_ms = 1_000_000
     state, error = commands.parse_desired_state(
