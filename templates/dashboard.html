@@ -210,7 +210,7 @@
     let startRequestInFlight = false;
     let visibilityRequestInFlight = false;
     let currentDesiredState = { throttle: 0, steering: 0, lights: false, stop: true };
-    let commandSequence = 1;
+    let commandSequence = Date.now();
     let streamConnectionError = null;
     let streamWhepUrl = null;
     let currentWhepSessionUrl = null;
