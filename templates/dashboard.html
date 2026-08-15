@@ -64,6 +64,7 @@
     .stream-diagnostics code { color: #e2e8f0; }
     .joystick { width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle at center, #1e3a8a 0%, #0f172a 70%); position: relative; border: 3px solid #60a5fa; touch-action: none; }
     .knob { width: 70px; height: 70px; border-radius: 50%; background: linear-gradient(135deg, #fbbf24, #f59e0b); position: absolute; top: 75px; left: 75px; cursor: pointer; }
+    .control-status { min-height: 1.25rem; margin: 0.75rem 0 0; color: #fca5a5; text-align: center; }
     .fullscreen-joystick {
       position: fixed;
       display: none;
@@ -172,6 +173,7 @@
             <div class="joystick" id="joystick">
               <div class="knob" id="knob"></div>
             </div>
+            <p id="control-status" class="control-status" role="status" aria-live="polite"></p>
           </div>
         </div>
       {% else %}
@@ -186,6 +188,7 @@
     const fullscreenKnob = document.getElementById('fullscreen-knob');
     const streamVideo = document.getElementById('stream-video');
     const streamDiagnostics = document.getElementById('stream-diagnostics');
+    const controlStatus = document.getElementById('control-status');
     const remainingTime = document.getElementById('remaining-time');
     const fullscreenTime = document.getElementById('fullscreen-time');
     const fullscreenToggle = document.getElementById('fullscreen-toggle');
@@ -973,7 +976,23 @@
           lights: currentDesiredState.lights,
           stop: Boolean(currentDesiredState.stop),
         })
-      }).catch(() => {});
+      }).then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.status !== 'ok') {
+          const message = payload.message || `request failed (${response.status})`;
+          if (controlStatus) {
+            controlStatus.textContent = `Controls unavailable: ${message}`;
+          }
+          return;
+        }
+        if (controlStatus) {
+          controlStatus.textContent = '';
+        }
+      }).catch(() => {
+        if (controlStatus) {
+          controlStatus.textContent = 'Controls unavailable: cannot reach the server';
+        }
+      });
     }
 
     if (joystick && knob) {
