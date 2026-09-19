@@ -18,6 +18,7 @@ def client():
     db_fd, db_path = tempfile.mkstemp()
     os.environ['DATABASE_URL'] = f'sqlite:///{db_path}'
     app = create_app({
+        'TESTING': True,
         'STREAM_READY_MIN_FRAMES': 1,
         'STREAM_READY_WINDOW_SECONDS': 2.0,
         'MEDIAMTX_TEST_PATH_STATES': {},

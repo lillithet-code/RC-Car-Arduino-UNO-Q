@@ -1,5 +1,6 @@
 import os
 import hmac
+import math
 import threading
 import time
 import re
@@ -222,6 +223,8 @@ def create_app(test_config=None):
             ensure_column('sessions', 'allocated_seconds', "INTEGER DEFAULT 300")
             ensure_column('sessions', 'consumed_seconds', 'INTEGER DEFAULT 0')
             ensure_column('sessions', 'last_billing_at', 'TEXT')
+            ensure_column('devices', 'steering_trim', 'REAL NOT NULL DEFAULT 0')
+            ensure_column('devices', 'admin_offline_at', 'TEXT')
             ensure_column('devices', 'poll_url', 'TEXT')
             ensure_column('devices', 'last_seen_at', 'TEXT')
             ensure_column('devices', 'last_poll_ok', 'INTEGER DEFAULT 0')
@@ -374,7 +377,7 @@ def create_app(test_config=None):
     def get_active_session(user_id):
         db = get_db()
         return db.execute('''
-            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, s.allocated_seconds, s.consumed_seconds, s.last_billing_at, d.name
+            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, s.allocated_seconds, s.consumed_seconds, s.last_billing_at, d.name, d.steering_trim, d.admin_offline_at
             FROM sessions s
             JOIN devices d ON d.id = s.device_id
             WHERE s.user_id = ? AND s.status = 'active'
@@ -500,8 +503,11 @@ def create_app(test_config=None):
         return state
 
     def latest_command_payload(raw_board_name):
+        expire_offline_sessions()
         state = command_state_for_board(raw_board_name)
         payload = dict(state['payload'])
+        device = get_db().execute('SELECT steering_trim FROM devices WHERE name = ?', (raw_board_name,)).fetchone()
+        payload['steering_trim'] = float(device['steering_trim']) if device else 0.0
         payload['control_active'] = board_has_active_session(raw_board_name)
         if not payload['control_active']:
             payload.update(throttle=0.0, steering=0.0, stop=True, action='stop')
@@ -831,7 +837,8 @@ def create_app(test_config=None):
     def parse_timestamp(raw_value):
         if not raw_value:
             return None
-        return datetime.strptime(raw_value, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(raw_value)
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
     def format_timestamp(value):
         if value is None:
@@ -927,11 +934,14 @@ def create_app(test_config=None):
             row['device_id']
             for row in db.execute("SELECT device_id FROM sessions WHERE status = 'active'").fetchall()
         }
-        devices = db.execute('SELECT id, status, last_seen_at FROM devices ORDER BY id').fetchall()
+        devices = db.execute('SELECT id, status, last_seen_at, admin_offline_at FROM devices ORDER BY id').fetchall()
 
         changed = False
         for device in devices:
-            if device['id'] in active_device_ids:
+            if device['admin_offline_at'] is not None:
+                deadline = parse_timestamp(device['admin_offline_at'])
+                desired_status = 'going_offline' if deadline and deadline > now else 'offline'
+            elif device['id'] in active_device_ids:
                 desired_status = 'in_use'
             elif is_device_online(device, now):
                 desired_status = 'available'
@@ -1011,6 +1021,7 @@ def create_app(test_config=None):
             app_state['board_last_poll_at'] = now
             try:
                 with app.app_context():
+                    expire_offline_sessions()
                     db = get_db()
                     devices = db.execute('SELECT id, poll_url FROM devices ORDER BY id').fetchall()
                     any_ok = False
@@ -1048,10 +1059,9 @@ def create_app(test_config=None):
                 app_state['board_last_error'] = str(exc)
             time.sleep(interval)
 
-    threading.Thread(target=poll_board_loop, daemon=True).start()
-
     @app.before_request
     def ensure_session_state():
+        expire_offline_sessions()
         if 'user_id' in session:
             refresh_sessions()
             sync_device_statuses()
@@ -1090,7 +1100,8 @@ def create_app(test_config=None):
             user = get_user_view(session['user_id'])
             active_session = get_active_session(session['user_id'])
             remaining_seconds = get_remaining_seconds(session['user_id'], active_session)
-            return render_template('dashboard.html', user=user, active_session=active_session, remaining_seconds=remaining_seconds)
+            latest = db.execute('SELECT status FROM sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1', (user['id'],)).fetchone()
+            return render_template('dashboard.html', user=user, active_session=active_session, remaining_seconds=remaining_seconds, maintenance_notice=latest and latest['status'] == 'admin_offline')
         return redirect(url_for('login'))
 
     @app.route('/register', methods=['GET', 'POST'])
@@ -1161,9 +1172,14 @@ def create_app(test_config=None):
 
         sync_device_statuses(db)
 
-        device = db.execute('SELECT id, name FROM devices WHERE status = ? ORDER BY id LIMIT 1', ('available',)).fetchone()
+        device = db.execute('SELECT id, name FROM devices WHERE status = ? AND admin_offline_at IS NULL ORDER BY id LIMIT 1', ('available',)).fetchone()
         if not device:
             return render_template('dashboard.html', user=user, error='No cars available right now', active_session=active_session, remaining_seconds=remaining_seconds)
+
+        claimed = db.execute("UPDATE devices SET status = 'in_use' WHERE id = ? AND status = 'available' AND admin_offline_at IS NULL", (device['id'],))
+        if not claimed.rowcount:
+            db.rollback()
+            return render_template('dashboard.html', user=user, error='That car is no longer available. Please try again.', active_session=None, remaining_seconds=remaining_seconds)
 
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)).strftime('%Y-%m-%d %H:%M:%S')
         db.execute(
@@ -1225,6 +1241,9 @@ def create_app(test_config=None):
             'stream_visible': is_session_visible(active_session['id']),
             'billing_started': active_session['billing_started_at'] is not None,
             'device': board_name,
+            'steering_trim': active_session['steering_trim'],
+            'offline_at': active_session['admin_offline_at'],
+            'server_now': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'),
             'mediamtx_reachable': bool(mediamtx_state['reachable']),
             'mediamtx_path_exists': bool(mediamtx_state['exists']),
             'mediamtx_has_h264': bool(mediamtx_state['has_h264']),
@@ -1247,6 +1266,9 @@ def create_app(test_config=None):
         return jsonify({
             'status': 'ok',
             'device': board_name,
+            'steering_trim': active_session['steering_trim'],
+            'offline_at': active_session['admin_offline_at'],
+            'server_now': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f'),
             'stream_path': stream_urls['path'],
             'whep_url': stream_urls['whep_url'],
             'rtsp_url': stream_urls['rtsp_url'],
@@ -1333,6 +1355,83 @@ def create_app(test_config=None):
             'message': 'server-side WebRTC offer is deprecated; use /api/session/stream and connect to MediaMTX WHEP',
         }), 410
 
+    def expire_offline_sessions():
+        db = get_db()
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f')
+        rows = db.execute("""
+            SELECT s.*, d.name AS board_name FROM sessions s
+            JOIN devices d ON d.id = s.device_id
+            WHERE s.status = 'active' AND d.admin_offline_at IS NOT NULL
+              AND d.admin_offline_at <= ?
+        """, (now,)).fetchall()
+        expired_rows = []
+        for row in rows:
+            updated = db.execute("""
+                UPDATE sessions SET status = 'admin_offline'
+                WHERE id = ? AND status = 'active' AND EXISTS (
+                    SELECT 1 FROM devices d WHERE d.id = sessions.device_id
+                    AND d.admin_offline_at IS NOT NULL AND d.admin_offline_at <= ?
+                )
+            """, (row['id'], now))
+            if updated.rowcount:
+                expired_rows.append(row)
+                refund = get_remaining_seconds(row['user_id'], row)
+                db.execute('UPDATE users SET balance = balance + ? WHERE id = ?', (refund, row['user_id']))
+                db.execute("UPDATE devices SET status = 'offline' WHERE id = ?", (row['device_id'],))
+                mark_session_visible(row['id'], False)
+        if rows:
+            db.commit()
+            for row in expired_rows:
+                force_stop_command(row['board_name'], reason='admin_offline')
+
+    def admin_api_authorized():
+        user = get_user_view(session.get('user_id'))
+        return bool(user and user['is_admin'])
+
+    @app.route('/api/admin/steering-trim', methods=['POST'])
+    def set_steering_trim():
+        if not admin_api_authorized():
+            return jsonify(status='error', message='Admin access required'), 403
+        active = get_active_session(session['user_id'])
+        if not active:
+            return jsonify(status='error', message='Take control of a car first'), 409
+        data = request.get_json(silent=True) or {}
+        try:
+            trim = float(data.get('trim'))
+        except (ValueError, TypeError):
+            return jsonify(status='error', message='Invalid steering trim'), 400
+        if not math.isfinite(trim) or not -0.3 <= trim <= 0.3:
+            return jsonify(status='error', message='Trim must be between -30% and +30%'), 400
+        db = get_db()
+        db.execute('UPDATE devices SET steering_trim = ? WHERE id = ?', (trim, active['device_id']))
+        db.commit()
+        return jsonify(status='ok', trim=trim)
+
+    @app.route('/api/admin/availability', methods=['POST'])
+    def set_admin_availability():
+        if not admin_api_authorized():
+            return jsonify(status='error', message='Admin access required'), 403
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data.get('online'), bool):
+            return jsonify(status='error', message='online must be a boolean'), 400
+        db = get_db()
+        if data.get('all') is True:
+            targets = db.execute('SELECT id FROM devices').fetchall()
+        else:
+            targets = db.execute('SELECT id FROM devices WHERE id = ?', (data.get('device_id'),)).fetchall()
+        if not targets:
+            return jsonify(status='error', message='No matching cars'), 404
+        deadline = None if data['online'] else (datetime.now(timezone.utc) + timedelta(seconds=10)).strftime('%Y-%m-%d %H:%M:%S.%f')
+        for target in targets:
+            if data['online']:
+                db.execute('UPDATE devices SET admin_offline_at = NULL WHERE id = ?', (target['id'],))
+            else:
+                # Repeated clicks must not extend a countdown already in progress.
+                db.execute('UPDATE devices SET admin_offline_at = COALESCE(admin_offline_at, ?) WHERE id = ?', (deadline, target['id']))
+        db.commit()
+        sync_device_statuses(db)
+        return jsonify(status='ok', offline_at=deadline)
+
     @app.route('/admin', methods=['GET', 'POST'])
     def admin():
         if 'user_id' not in session:
@@ -1409,6 +1508,8 @@ def create_app(test_config=None):
                 id,
                 name,
                 status,
+                steering_trim,
+                admin_offline_at,
                 location,
                 preferred_h264_encoder,
                 preferred_video_mode,
@@ -1475,7 +1576,7 @@ def create_app(test_config=None):
             item['reported_video_mode'] = item.get('reported_video_mode') or 'n/a'
             devices.append(item)
 
-        return render_template('admin.html', users=users, devices=devices, format_seconds=format_seconds)
+        return render_template('admin.html', users=users, devices=devices, format_seconds=format_seconds, all_offline=bool(devices) and all(d['admin_offline_at'] for d in devices), server_now=datetime.now(timezone.utc).isoformat())
 
     @app.route('/api/devices/register', methods=['POST'])
     def register_device():
@@ -1876,6 +1977,8 @@ def create_app(test_config=None):
 
         return Response(generate_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+    if not app.config['TESTING']:
+        threading.Thread(target=poll_board_loop, daemon=True).start()
     return app
 
 

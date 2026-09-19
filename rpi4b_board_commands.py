@@ -256,7 +256,7 @@ class CarGPIODriver:
 
         return False
 
-    def apply_state(self, throttle=0.0, steering=0.0, lights=False, stop=False, control_active=False):
+    def apply_state(self, throttle=0.0, steering=0.0, lights=False, stop=False, control_active=False, steering_trim=0.0):
         # Fail closed at boot and when talking to a server without session status.
         if control_active is not True:
             self.emergency_stop(keep_lights=True)
@@ -271,6 +271,7 @@ class CarGPIODriver:
         try:
             throttle = float(throttle)
             steering = float(steering)
+            steering_trim = max(-0.3, min(0.3, float(steering_trim)))
         except (TypeError, ValueError):
             return False
 
@@ -279,7 +280,7 @@ class CarGPIODriver:
 
         self._apply_throttle(throttle, stop=stop)
 
-        servo_angle = SERVO_CENTER_ANGLE + ((SERVO_RIGHT_ANGLE - SERVO_LEFT_ANGLE) * 0.5 * steering)
+        servo_angle = SERVO_CENTER_ANGLE + ((SERVO_RIGHT_ANGLE - SERVO_LEFT_ANGLE) * 0.5 * max(-1.0, min(1.0, steering + steering_trim)))
         idle = (stop or throttle == 0.0) and steering == 0.0
         self._set_steering(None if idle else servo_angle)
         self._set('lights', bool(lights))
@@ -395,6 +396,7 @@ def parse_desired_state(payload, last_sequence, now_ms):
     try:
         throttle = float(payload.get('throttle', 0.0))
         steering = float(payload.get('steering', 0.0))
+        steering_trim = max(-0.3, min(0.3, float(payload.get('steering_trim', 0.0))))
     except (TypeError, ValueError):
         return None, 'invalid_axes'
 
@@ -415,6 +417,7 @@ def parse_desired_state(payload, last_sequence, now_ms):
         'lights': bool(payload.get('lights', False)),
         'stop': stop,
         'control_active': control_active,
+        'steering_trim': steering_trim,
     }
     return state, None
 
@@ -465,6 +468,7 @@ def main():
                     lights=desired_state['lights'],
                     stop=desired_state['stop'],
                     control_active=desired_state['control_active'],
+                    steering_trim=desired_state['steering_trim'],
                 ):
                     last_sequence = desired_state['sequence']
                     watchdog_deadline = time.monotonic() + (MOTOR_WATCHDOG_MS / 1000.0)

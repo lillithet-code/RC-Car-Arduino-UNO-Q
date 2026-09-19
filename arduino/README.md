@@ -36,6 +36,7 @@ This folder contains firmware for an Arduino UNO that controls an RC car with a 
    - `S` stop
    - `0`-`9` requested speed (zero to full PWM)
    - `H` toggle headlights
+   - `T<degrees>` followed by newline: saved server steering trim, clamped to -9 through +9 degrees (the bridge converts the website percentage)
 
 ## Suggested wiring
 - DRV8871 PWM -> D3

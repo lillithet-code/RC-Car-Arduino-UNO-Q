@@ -68,6 +68,13 @@ python3 rpi_csi_stream_sender.py
 python3 rpi4b_board_commands.py
 ```
 
+## Admin steering trim and maintenance
+
+- While controlling a car, admins can use **Left / Right / Reset** below the joystick to save steering trim for that car. Trim is stored in the server database and applied for every driver, including after server restarts. Each step is 1% of steering travel, with a range of -30% to +30%; output stays within the steering endpoints. Steer or drive to check alignment; trim alone does not wake an idle servo.
+- The admin vehicle list has a **Take offline in 10 seconds** button for each car and an equivalent button above the list for all cars. The current driver sees a warning and countdown, including in fullscreen. Booking is blocked immediately; when the deadline expires, the server stops control, ends the session, and refunds unused time.
+- Offline settings survive restarts and board reconnects. **Set online / cancel shutdown** restores admin availability or cancels a pending countdown. The board must also be connected before it can be booked. The all-car button affects every car registered when clicked.
+- Deploy the updated server and Pi command script together. UNO Q trim additionally requires the updated command bridge and Arduino sketch (`T<degrees>\n` serial command or `car_set_trim` RPC).
+
 ## Board-side variables
 - `SERVER_URL`: Flask server base URL
 - `BOARD_TOKEN`: shared board token

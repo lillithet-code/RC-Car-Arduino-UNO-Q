@@ -251,6 +251,27 @@ def send_command_on_connection(action, connection):
     return True
 
 
+def send_steering_trim_on_connection(trim, connection):
+    # Firmware steering endpoints span +/-30 degrees around center.
+    degrees = round(max(-0.3, min(0.3, float(trim))) * 30)
+    transport = TARGET_CONFIG.get('transport')
+    if transport == 'disabled':
+        return False
+    if transport == 'rpc':
+        if msgpack is None:
+            raise RuntimeError('msgpack is required for rpc command transport')
+        connection.sendall(msgpack.packb([2, 'car_set_trim', [degrees]]))
+        return True
+    payload = f'T{degrees}\n'.encode('ascii')
+    if transport == 'udp':
+        connection.sendto(payload, (TARGET_CONFIG['host'], TARGET_CONFIG['port']))
+    elif transport in {'tcp', 'unix'}:
+        connection.sendall(payload)
+    else:
+        connection.write(payload)
+    return True
+
+
 def register_device():
     url = f'{SERVER_BASE_URL}/api/devices/register'
     payload = json.dumps({
@@ -292,6 +313,7 @@ def main():
 
     connection = None
     command_ws = None
+    last_steering_trim = None
 
     register_device()
 
@@ -306,6 +328,7 @@ def main():
         if transport != 'disabled' and connection is None:
             try:
                 connection = open_command_connection()
+                last_steering_trim = None
                 if transport == 'serial':
                     print(f'serial connected: {SERIAL_PORT} @ {SERIAL_BAUD_RATE}')
                 else:
@@ -330,6 +353,11 @@ def main():
                 raise RuntimeError('empty websocket message')
 
             payload = json.loads(raw_message)
+            if transport != 'disabled':
+                trim = payload.get('steering_trim', 0.0)
+                if trim != last_steering_trim:
+                    send_steering_trim_on_connection(trim, connection)
+                    last_steering_trim = trim
             action = payload.get('action')
             if not action:
                 continue

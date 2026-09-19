@@ -44,6 +44,17 @@ def test_throttle_changes_apply_immediately_without_scaling(driver, monkeypatch)
         assert_motor_output(driver, max(throttle, 0.0), max(-throttle, 0.0))
 
 
+def test_saved_trim_offsets_center_clamps_endpoints_and_does_not_wake_idle_servo(driver):
+    driver.apply_state(control_active=True, throttle=1, steering_trim=0.1)
+    assert driver._servo.angle == pytest.approx(3.0)
+    driver.apply_state(control_active=True, throttle=1, steering=1, steering_trim=0.3)
+    assert driver._servo.angle == commands.SERVO_RIGHT_ANGLE
+    driver.apply_state(control_active=True, stop=True, steering_trim=0.1)
+    assert driver._servo.angle is None
+    driver.apply_state(control_active=False, throttle=1, steering_trim=0.1)
+    assert driver._servo.angle is None
+
+
 @pytest.mark.parametrize('throttle,forward,reverse', [
     (2.0, 1.0, 0.0),
     (-2.0, 0.0, 1.0),

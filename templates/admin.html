@@ -67,6 +67,8 @@
 
     <div class="card">
       <h2>Vehicles</h2>
+      <button type="button" class="availability-button" data-all="true" data-online="{{ 'true' if all_offline else 'false' }}">{{ 'Set all cars online' if all_offline else 'Take all cars offline in 10 seconds' }}</button>
+      <p id="availability-feedback" role="status" aria-live="polite"></p>
       <table>
         <thead>
           <tr>
@@ -81,7 +83,11 @@
           {% for device in devices %}
           <tr>
             <td>{{ device.name }}</td>
-            <td>{{ device.status }}</td>
+            <td>
+              <span>{{ device.status }}</span>
+              {% if device.admin_offline_at %}<p class="offline-countdown" data-deadline="{{ device.admin_offline_at }}" role="status"></p>{% endif %}
+              <button type="button" class="availability-button" data-device-id="{{ device.id }}" data-online="{{ 'true' if device.admin_offline_at else 'false' }}">{{ 'Set online / cancel shutdown' if device.admin_offline_at else 'Take offline in 10 seconds' }}</button>
+            </td>
             <td>{{ device.location }}</td>
             <td>
               <div>Encoder: {{ device.reported_h264_encoder }}</div>
@@ -121,5 +127,34 @@
       </table>
     </div>
   </div>
+<script>
+    const serverOffset = Date.parse({{ server_now|tojson }}) - Date.now();
+    function updateCountdowns() {
+      document.querySelectorAll('.offline-countdown').forEach(element => {
+        const deadline = Date.parse(element.dataset.deadline.replace(' ', 'T') + 'Z');
+        const seconds = Math.max(0, Math.ceil((deadline - Date.now() - serverOffset) / 1000));
+        element.textContent = seconds ? `Going offline in ${seconds} seconds. Current driver has been notified.` : 'Offline — booking disabled until restored by an admin.';
+      });
+    }
+    updateCountdowns();
+    setInterval(updateCountdowns, 250);
+    document.querySelectorAll('.availability-button').forEach(button => {
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          const response = await fetch('/api/admin/availability', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({online: button.dataset.online === 'true', all: button.dataset.all === 'true', device_id: button.dataset.deviceId}),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.message || 'Could not update availability');
+          window.location.reload();
+        } catch (error) {
+          document.getElementById('availability-feedback').textContent = error.message;
+          button.disabled = false;
+        }
+      });
+    });
+  </script>
 </body>
 </html>

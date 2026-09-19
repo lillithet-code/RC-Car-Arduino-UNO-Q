@@ -151,9 +151,11 @@
 
     <div class="card">
       <h2>Current Session</h2>
+      {% if maintenance_notice %}<p class="error" role="status">Your car was taken offline by an administrator. Unused driving time has been returned.</p>{% endif %}
       {% if active_session %}
         <p>Connected to {{ active_session.name }}. Your time is counting down live.</p>
-        <div class="session-layout" id="session-layout">
+        <div class="session-layout" id="session-layout" style="position:relative;">
+          <div id="offline-warning" role="alert" aria-live="assertive" style="display:none;position:absolute;top:0;left:0;right:0;z-index:50;background:#7f1d1d;color:white;padding:1rem;border-radius:8px;"></div>
           <div class="video-panel">
             <div class="video-stage" id="video-stage">
               <a href="#" id="fullscreen-toggle" class="fullscreen-toggle">Fullscreen</a>
@@ -173,6 +175,16 @@
             <div class="joystick" id="joystick">
               <div class="knob" id="knob"></div>
             </div>
+            {% if user.is_admin %}
+            <fieldset style="margin-top:1rem;border:1px solid #334155;border-radius:8px;">
+              <legend>Steering trim · {{ active_session.name }}</legend>
+              <button type="button" class="trim-button" data-step="-1" aria-label="Trim steering left">← Left</button>
+              <output id="steering-trim" data-value="{{ active_session.steering_trim or 0 }}">{{ '%+.0f'|format((active_session.steering_trim or 0) * 100) }}%</output>
+              <button type="button" class="trim-button" data-step="1" aria-label="Trim steering right">Right →</button>
+              <button type="button" class="trim-button" data-step="0">Reset</button>
+              <p id="trim-status" role="status" aria-live="polite">Saved for this car and every driver. Steer or drive to check alignment.</p>
+            </fieldset>
+            {% endif %}
             <p id="control-status" class="control-status" role="status" aria-live="polite"></p>
           </div>
         </div>
@@ -182,6 +194,36 @@
     </div>
   </div>
   <script>
+    let offlineDeadline = null;
+    let serverClockOffset = 0;
+    const offlineWarning = document.getElementById('offline-warning');
+    function showOfflineCountdown() {
+      if (!offlineWarning) return;
+      offlineWarning.style.display = offlineDeadline ? 'block' : 'none';
+      if (offlineDeadline) {
+        const seconds = Math.max(0, Math.ceil((offlineDeadline - Date.now() - serverClockOffset) / 1000));
+        offlineWarning.textContent = seconds ? `An administrator is taking this car offline in ${seconds} seconds. Please stop driving.` : 'This car is now offline. Your session has ended.';
+      }
+    }
+    setInterval(showOfflineCountdown, 250);
+    const trimOutput = document.getElementById('steering-trim');
+    const trimButtons = document.querySelectorAll('.trim-button');
+    trimButtons.forEach(button => button.addEventListener('click', async () => {
+      const step = Number(button.dataset.step);
+      const trim = step === 0 ? 0 : Math.max(-30, Math.min(30, Math.round(Number(trimOutput.dataset.value) * 100) + step)) / 100;
+      trimButtons.forEach(item => { item.disabled = true; });
+      try {
+        const response = await fetch('/api/admin/steering-trim', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({trim}),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.message || 'Could not save trim');
+        trimOutput.dataset.value = payload.trim;
+        trimOutput.textContent = `${payload.trim >= 0 ? '+' : ''}${Math.round(payload.trim * 100)}%`;
+        document.getElementById('trim-status').textContent = 'Saved for this car and every driver.';
+      } catch (error) { document.getElementById('trim-status').textContent = error.message; }
+      finally { trimButtons.forEach(item => { item.disabled = false; }); }
+    }));
     const joystick = document.getElementById('joystick');
     const knob = document.getElementById('knob');
     const fullscreenJoystick = document.getElementById('fullscreen-joystick');
@@ -905,6 +947,9 @@
           return;
         }
 
+        offlineDeadline = payload.offline_at ? Date.parse(payload.offline_at.replace(' ', 'T') + 'Z') : null;
+        if (payload.server_now) serverClockOffset = Date.parse(payload.server_now.replace(' ', 'T') + 'Z') - Date.now();
+        showOfflineCountdown();
         hasActiveSession = Boolean(payload.active);
         streamLive = Boolean(payload.stream_live);
         streamReady = Boolean(payload.stream_ready);
@@ -934,7 +979,7 @@
         }
 
         if (!hasActiveSession && joystick) {
-          window.location.reload();
+          window.location.assign('/');
         }
       } catch (error) {
         // Keep UI running; transient polling errors should not break controls.

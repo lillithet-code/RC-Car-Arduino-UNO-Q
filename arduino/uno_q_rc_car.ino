@@ -35,6 +35,10 @@ const int lightPins[] = {LIGHT_PIN_1, LIGHT_PIN_2, LIGHT_PIN_3, LIGHT_PIN_4};
 int speedLevel = 255;
 bool headlightsOn = false;
 int steeringAngle = 90;
+int steeringTrim = 0;
+bool readingTrim = false;
+char trimBuffer[5];
+unsigned int trimLength = 0;
 const unsigned long COMMAND_TIMEOUT_MS = 550;
 unsigned long lastMotionCommandAtMs = 0;
 bool motorCommandActive = false;
@@ -62,6 +66,7 @@ void setup() {
   Bridge.provide_safe("car_left", rpc_left);
   Bridge.provide_safe("car_right", rpc_right);
   Bridge.provide_safe("car_stop", rpc_stop);
+  Bridge.provide_safe("car_set_trim", rpc_set_trim);
   Bridge.provide_safe("car_lights_on", rpc_lights_on);
   Bridge.provide_safe("car_lights_off", rpc_lights_off);
   Serial.println("Router Bridge command handlers ready");
@@ -75,41 +80,59 @@ void loop() {
   if (Serial.available() > 0) {
     char command = toupper(Serial.read());
 
-    switch (command) {
-      case 'F':
-        driveForward();
-        break;
-      case 'B':
-        driveBackward();
-        break;
-      case 'L':
-        turnLeft();
-        break;
-      case 'R':
-        turnRight();
-        break;
-      case 'S':
-        stopCar();
-        break;
-      case 'H':
-        toggleHeadlights();
-        break;
-      case '0':
-      case '1':
-      case '2':
-      case '3':
-      case '4':
-      case '5':
-      case '6':
-      case '7':
-      case '8':
-      case '9':
-        speedLevel = (command - '0') * 255 / 9;
-        Serial.print("Speed:");
-        Serial.println(speedLevel);
-        break;
-      default:
-        break;
+    if (readingTrim) {
+      if (command == '\n' || command == '\r') {
+        trimBuffer[trimLength] = '\0';
+        if (trimLength > 0) setSteeringTrim(atoi(trimBuffer));
+        readingTrim = false;
+      } else if ((command == '-' && trimLength == 0) || isdigit(command)) {
+        if (trimLength < sizeof(trimBuffer) - 1) trimBuffer[trimLength++] = command;
+        else readingTrim = false;
+      } else {
+        readingTrim = false;
+      }
+    } else {
+
+      switch (command) {
+        case 'T':
+          readingTrim = true;
+          trimLength = 0;
+          break;
+        case 'F':
+          driveForward();
+          break;
+        case 'B':
+          driveBackward();
+          break;
+        case 'L':
+          turnLeft();
+          break;
+        case 'R':
+          turnRight();
+          break;
+        case 'S':
+          stopCar();
+          break;
+        case 'H':
+          toggleHeadlights();
+          break;
+        case '0':
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7':
+        case '8':
+        case '9':
+          speedLevel = (command - '0') * 255 / 9;
+          Serial.print("Speed:");
+          Serial.println(speedLevel);
+          break;
+        default:
+          break;
+      }
     }
   }
 
@@ -160,7 +183,12 @@ void applySteering() {
   if (!steeringServo.attached()) {
     steeringServo.attach(steeringPin);
   }
-  steeringServo.write(steeringAngle);
+  steeringServo.write(constrain(steeringAngle + steeringTrim, 60, 120));
+}
+
+void setSteeringTrim(int degrees) {
+  steeringTrim = constrain(degrees, -9, 9);
+  if (steeringServo.attached()) applySteering();
 }
 
 void stopCar() {
@@ -183,6 +211,10 @@ void toggleHeadlights() {
 }
 
 #if HAS_ROUTER_BRIDGE
+void rpc_set_trim(int degrees) {
+  setSteeringTrim(degrees);
+}
+
 void rpc_forward() {
   driveForward();
 }
