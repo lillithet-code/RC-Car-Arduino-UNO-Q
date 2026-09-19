@@ -70,6 +70,54 @@ def test_stop_and_emergency_stop_remain_immediate(driver):
     driver.apply_state(throttle=-1.0)
     driver.emergency_stop()
     assert_motor_output(driver, 0.0, 0.0)
+    assert driver._servo.angle is None
+
+
+def test_idle_disables_steering_and_active_commands_restore_it(driver):
+    driver.apply_state(throttle=1.0, steering=0.0)
+    assert driver._servo.angle == commands.SERVO_CENTER_ANGLE
+    driver.apply_state(throttle=0.0, steering=0.0, stop=True)
+    assert driver._servo.angle is None
+    # Repeated server stop messages must not wake the servo.
+    driver.apply_state(throttle=0.0, steering=0.0, stop=True)
+    assert driver._servo.angle is None
+    driver.apply_state(throttle=0.0, steering=1.0, stop=True)
+    assert driver._servo.angle == commands.SERVO_RIGHT_ANGLE
+    driver.apply_action('stop')
+    assert driver._servo.angle is None
+    driver.apply_action('left')
+    assert driver._servo.angle == commands.SERVO_LEFT_ANGLE
+    for action in ('forward', 'back'):
+        driver.apply_action('stop')
+        driver.apply_action(action)
+        assert driver._servo.angle == commands.SERVO_CENTER_ANGLE
+
+
+def test_software_servo_emits_no_pulses_until_enabled_and_after_disable(monkeypatch):
+    device = Mock()
+    monkeypatch.setattr(commands, 'DigitalOutputDevice', Mock(return_value=device))
+    monkeypatch.setattr(commands.threading, 'Thread', Mock())
+    monkeypatch.setattr(commands.time, 'sleep', Mock())
+    servo = commands.SoftwareServoPWM(6, -90, 90, 0.0005, 0.0025, 0.02)
+
+    def run_one_frame():
+        servo._stop_event = Mock()
+        servo._stop_event.is_set.side_effect = [False, True]
+        device.reset_mock()
+        servo._run()
+
+    run_one_frame()
+    device.on.assert_not_called()
+    servo.angle = 30
+    run_one_frame()
+    device.on.assert_called_once()
+    device.off.assert_called_once()
+    servo.angle = None
+    run_one_frame()
+    device.on.assert_not_called()
+    servo.angle = 0
+    run_one_frame()
+    device.on.assert_called_once()
 
 
 def test_parse_desired_state_accepts_valid_payload():

@@ -49,8 +49,6 @@ void setup() {
     digitalWrite(lightPins[i], LOW);
   }
 
-  steeringServo.attach(steeringPin);
-  steeringServo.write(steeringAngle);
 
   Serial.begin(SERIAL_BAUD_RATE);
   Serial.print("Car profile: ");
@@ -126,7 +124,7 @@ void driveForward() {
   analogWrite(motorPWM, speedLevel);
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
-  steeringServo.write(steeringAngle);
+  applySteering();
 }
 
 void driveBackward() {
@@ -135,7 +133,7 @@ void driveBackward() {
   analogWrite(motorPWM, speedLevel);
   digitalWrite(motorIN1, LOW);
   digitalWrite(motorIN2, HIGH);
-  steeringServo.write(steeringAngle);
+  applySteering();
 }
 
 void turnLeft() {
@@ -145,7 +143,7 @@ void turnLeft() {
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
   steeringAngle = 60;
-  steeringServo.write(steeringAngle);
+  applySteering();
 }
 
 void turnRight() {
@@ -155,6 +153,13 @@ void turnRight() {
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
   steeringAngle = 120;
+  applySteering();
+}
+
+void applySteering() {
+  if (!steeringServo.attached()) {
+    steeringServo.attach(steeringPin);
+  }
   steeringServo.write(steeringAngle);
 }
 
@@ -165,7 +170,9 @@ void stopCar() {
   digitalWrite(motorIN1, LOW);
   digitalWrite(motorIN2, LOW);
   steeringAngle = 90;
-  steeringServo.write(steeringAngle);
+  steeringServo.detach();
+  pinMode(steeringPin, OUTPUT);
+  digitalWrite(steeringPin, LOW);
 }
 
 void toggleHeadlights() {

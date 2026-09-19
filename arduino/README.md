@@ -21,6 +21,7 @@ This folder contains firmware for an Arduino UNO that controls an RC car with a 
 ### Built-in profiles
 - `CAR_PROFILE_CAR_1` and `CAR_PROFILE_CAR_2` select the wiring for each car.
 - All profiles start at full PWM (`255`), with immediate motor response and no reduction while turning.
+- Steering PWM is off at startup and after stop/watchdog timeout. The next movement command reattaches the servo. While detached, the servo does not actively hold or center the wheels.
 - Explicit serial speed commands remain available: `0` requests zero PWM and `9` requests full PWM (`255`), with linear steps between them.
 
 ## Usage
