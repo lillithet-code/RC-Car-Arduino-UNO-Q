@@ -1,5 +1,8 @@
 import os
 import sys
+from unittest.mock import Mock
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -20,13 +23,53 @@ def test_normalize_gpiozero_pin_factory_falls_back_when_lgpio_missing(monkeypatc
     assert env['GPIOZERO_PIN_FACTORY'] == 'native'
 
 
-def test_ramp_throttle_reaches_full_speed_in_configured_duration():
-    assert commands.ramp_throttle(0.0, 1.0, 1.0, 5.0) == 0.2
-    assert commands.ramp_throttle(0.8, 1.0, 1.0, 5.0) == 1.0
+@pytest.fixture
+def driver(monkeypatch):
+    monkeypatch.setattr(commands, 'DigitalOutputDevice', Mock())
+    monkeypatch.setattr(commands, 'PWMOutputDevice', Mock(side_effect=lambda *args, **kwargs: Mock()))
+    monkeypatch.setattr(commands, 'SoftwareServoPWM', Mock())
+    return commands.CarGPIODriver()
 
 
-def test_ramp_throttle_can_be_disabled():
-    assert commands.ramp_throttle(0.0, 1.0, 0.1, 0.0) == 1.0
+def assert_motor_output(driver, forward, reverse):
+    assert driver._devices['drive_in1'].value == forward
+    assert driver._devices['drive_in2'].value == reverse
+
+
+def test_throttle_changes_apply_immediately_without_scaling(driver, monkeypatch):
+    # No elapsed time is needed, even when reversing or reducing throttle.
+    monkeypatch.setattr(commands.time, 'monotonic', lambda: 100.0)
+    for throttle in (1.0, 0.3, -1.0, -0.4, 0.0, 1.0):
+        assert driver.apply_state(throttle=throttle)
+        assert_motor_output(driver, max(throttle, 0.0), max(-throttle, 0.0))
+
+
+@pytest.mark.parametrize('throttle,forward,reverse', [
+    (2.0, 1.0, 0.0),
+    (-2.0, 0.0, 1.0),
+])
+def test_throttle_stays_within_physical_pwm_range(driver, throttle, forward, reverse):
+    assert driver.apply_state(throttle=throttle)
+    assert_motor_output(driver, forward, reverse)
+
+
+@pytest.mark.parametrize('action,forward,reverse', [
+    ('forward', 1.0, 0.0),
+    ('back', 0.0, 1.0),
+    ('stop', 0.0, 0.0),
+])
+def test_discrete_actions_use_full_motor_output(driver, action, forward, reverse):
+    assert driver.apply_action(action)
+    assert_motor_output(driver, forward, reverse)
+
+
+def test_stop_and_emergency_stop_remain_immediate(driver):
+    driver.apply_state(throttle=1.0)
+    driver.apply_state(throttle=1.0, stop=True)
+    assert_motor_output(driver, 0.0, 0.0)
+    driver.apply_state(throttle=-1.0)
+    driver.emergency_stop()
+    assert_motor_output(driver, 0.0, 0.0)
 
 
 def test_parse_desired_state_accepts_valid_payload():

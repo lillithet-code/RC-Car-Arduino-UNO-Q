@@ -3,7 +3,7 @@
 // and four lighting outputs controlled from the UNO.
 //
 // Edit arduino/car_config.h to choose the active car profile.
-// Each profile can use a different pin map and default speed.
+// Each profile can use a different pin map.
 //
 // Serial commands:
 //   F = forward
@@ -11,7 +11,7 @@
 //   L = left
 //   R = right
 //   S = stop
-//   0-9 = speed (0-9)
+//   0-9 = requested speed, from stopped (0) to full PWM (9)
 //   H = headlights on/off
 
 #include <Servo.h>
@@ -32,7 +32,7 @@ const int motorIN2 = MOTOR_IN2_PIN;
 const int steeringPin = SERVO_STEERING_PIN;
 const int lightPins[] = {LIGHT_PIN_1, LIGHT_PIN_2, LIGHT_PIN_3, LIGHT_PIN_4};
 
-int speedLevel = DEFAULT_SPEED_LEVEL;
+int speedLevel = 255;
 bool headlightsOn = false;
 int steeringAngle = 90;
 const unsigned long COMMAND_TIMEOUT_MS = 550;
@@ -106,7 +106,7 @@ void loop() {
       case '7':
       case '8':
       case '9':
-        speedLevel = 40 + (command - '0') * 20;
+        speedLevel = (command - '0') * 255 / 9;
         Serial.print("Speed:");
         Serial.println(speedLevel);
         break;
@@ -141,7 +141,7 @@ void driveBackward() {
 void turnLeft() {
   motorCommandActive = true;
   lastMotionCommandAtMs = millis();
-  analogWrite(motorPWM, speedLevel / 2);
+  analogWrite(motorPWM, speedLevel);
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
   steeringAngle = 60;
@@ -151,7 +151,7 @@ void turnLeft() {
 void turnRight() {
   motorCommandActive = true;
   lastMotionCommandAtMs = millis();
-  analogWrite(motorPWM, speedLevel / 2);
+  analogWrite(motorPWM, speedLevel);
   digitalWrite(motorIN1, HIGH);
   digitalWrite(motorIN2, LOW);
   steeringAngle = 120;

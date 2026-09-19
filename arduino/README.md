@@ -19,8 +19,9 @@ This folder contains firmware for an Arduino UNO that controls an RC car with a 
 4. Upload the sketch to each Arduino UNO.
 
 ### Built-in profiles
-- `CAR_PROFILE_CAR_1` uses a default speed of 180.
-- `CAR_PROFILE_CAR_2` uses a default speed of 170.
+- `CAR_PROFILE_CAR_1` and `CAR_PROFILE_CAR_2` select the wiring for each car.
+- All profiles start at full PWM (`255`), with immediate motor response and no reduction while turning.
+- Explicit serial speed commands remain available: `0` requests zero PWM and `9` requests full PWM (`255`), with linear steps between them.
 
 ## Usage
 1. Open the sketch in the Arduino IDE.
@@ -32,7 +33,7 @@ This folder contains firmware for an Arduino UNO that controls an RC car with a 
    - `L` left
    - `R` right
    - `S` stop
-   - `0`-`9` speed levels
+   - `0`-`9` requested speed (zero to full PWM)
    - `H` toggle headlights
 
 ## Suggested wiring

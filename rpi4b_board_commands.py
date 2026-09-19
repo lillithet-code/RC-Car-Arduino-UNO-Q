@@ -62,23 +62,8 @@ SERVO_MAX_ANGLE = float(os.environ.get('SERVO_MAX_ANGLE', '90'))
 SERVO_MIN_PULSE_WIDTH = float(os.environ.get('SERVO_MIN_PULSE_WIDTH', '0.0005'))
 SERVO_MAX_PULSE_WIDTH = float(os.environ.get('SERVO_MAX_PULSE_WIDTH', '0.0025'))
 SERVO_FRAME_WIDTH = float(os.environ.get('SERVO_FRAME_WIDTH', '0.02'))
-FORWARD_THROTTLE = max(0.0, min(1.0, float(os.environ.get('FORWARD_THROTTLE', '0.65'))))
-BACK_THROTTLE = max(0.0, min(1.0, float(os.environ.get('BACK_THROTTLE', '0.5'))))
-MOTOR_ACCELERATION_SECONDS = max(0.0, float(os.environ.get('MOTOR_ACCELERATION_SECONDS', '5.0')))
 LIGHTS_PIN = int(os.environ.get('LIGHTS_PIN', '5'))
 GPIO_ACTIVE_HIGH = os.environ.get('GPIO_ACTIVE_HIGH', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
-
-
-def ramp_throttle(current, target, elapsed_seconds, acceleration_seconds):
-    current = max(-1.0, min(1.0, float(current)))
-    target = max(-1.0, min(1.0, float(target)))
-    if acceleration_seconds <= 0:
-        return target
-
-    maximum_change = max(0.0, float(elapsed_seconds)) / acceleration_seconds
-    if target > current:
-        return min(target, current + maximum_change)
-    return max(target, current - maximum_change)
 
 
 class SoftwareServoPWM:
@@ -151,8 +136,6 @@ class CarGPIODriver:
         self._pwm_capable = {}
         self._servo = None
         self._warned_servo_unavailable = False
-        self._applied_throttle = 0.0
-        self._last_throttle_update = time.monotonic()
 
         if self.dry_run:
             print('GPIO dry-run enabled; commands will be logged only')
@@ -214,22 +197,13 @@ class CarGPIODriver:
         self._set('drive_in2', reverse_duty)
 
     def _apply_throttle(self, throttle, stop=False):
-        now = time.monotonic()
         if stop:
-            self._applied_throttle = 0.0
-        else:
-            self._applied_throttle = ramp_throttle(
-                self._applied_throttle,
-                throttle,
-                now - self._last_throttle_update,
-                MOTOR_ACCELERATION_SECONDS,
-            )
-        self._last_throttle_update = now
+            throttle = 0.0
 
-        if self._applied_throttle > 0:
-            self._set_throttle(FORWARD_THROTTLE * self._applied_throttle, 0.0)
-        elif self._applied_throttle < 0:
-            self._set_throttle(0.0, BACK_THROTTLE * abs(self._applied_throttle))
+        if throttle > 0:
+            self._set_throttle(throttle, 0.0)
+        elif throttle < 0:
+            self._set_throttle(0.0, abs(throttle))
         else:
             self._set_throttle(0.0, 0.0)
 
@@ -252,10 +226,10 @@ class CarGPIODriver:
             return command in {'forward', 'back', 'left', 'right', 'stop', 'lights_on', 'lights_off'}
 
         if command == 'forward':
-            self._set_throttle(FORWARD_THROTTLE, 0.0)
+            self._set_throttle(1.0, 0.0)
             return True
         if command == 'back':
-            self._set_throttle(0.0, BACK_THROTTLE)
+            self._set_throttle(0.0, 1.0)
             return True
         if command == 'left':
             self._set_steering(SERVO_LEFT_ANGLE)
@@ -304,8 +278,6 @@ class CarGPIODriver:
         if self.dry_run:
             print(f'gpio emergency_stop keep_lights={bool(keep_lights)}')
             return
-        self._applied_throttle = 0.0
-        self._last_throttle_update = time.monotonic()
         self._set_throttle(0.0, 0.0)
         self._set_steering(SERVO_CENTER_ANGLE)
         if not keep_lights:

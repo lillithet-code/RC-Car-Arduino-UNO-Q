@@ -18,7 +18,6 @@
 #define LIGHT_PIN_3 6
 #define LIGHT_PIN_4 7
 #define CAMERA_STREAM_ENABLED true
-#define DEFAULT_SPEED_LEVEL 180
 #define SERIAL_BAUD_RATE 9600
 #endif
 
@@ -33,7 +32,6 @@
 #define LIGHT_PIN_3 6
 #define LIGHT_PIN_4 7
 #define CAMERA_STREAM_ENABLED true
-#define DEFAULT_SPEED_LEVEL 170
 #define SERIAL_BAUD_RATE 9600
 #endif
 
@@ -48,7 +46,6 @@
 #define LIGHT_PIN_3 6
 #define LIGHT_PIN_4 7
 #define CAMERA_STREAM_ENABLED true
-#define DEFAULT_SPEED_LEVEL 180
 #define SERIAL_BAUD_RATE 9600
 #endif
 
