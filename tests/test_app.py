@@ -798,6 +798,7 @@ def test_board_commands_are_exposed_for_the_board_client(client):
     payload = board_response.get_json()
     assert payload['status'] == 'ok'
     assert payload['sequence'] == 11
+    assert payload['control_active'] is True
     assert payload['throttle'] == 0.65
     assert payload['steering'] == -0.25
     assert payload['lights'] is True
@@ -826,9 +827,17 @@ def test_release_car_overwrites_motion_with_stop(client):
     assert client.post('/release_car', follow_redirects=True).status_code == 200
 
     board_state = client.get('/api/board/command?board_name=rc-car-safety').get_json()
+    assert board_state['control_active'] is False
     assert board_state['status'] == 'ok'
     assert board_state['stop'] is True
     assert board_state['throttle'] == 0.0
+
+
+def test_unassigned_board_has_no_control_permission(client):
+    payload = client.get('/api/board/command?board_name=unassigned-pi').get_json()
+    assert payload['control_active'] is False
+    assert payload['stop'] is True
+    assert payload['throttle'] == payload['steering'] == 0.0
 
 
 def test_logout_overwrites_motion_with_stop(client):

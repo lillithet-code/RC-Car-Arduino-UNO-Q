@@ -501,7 +501,11 @@ def create_app(test_config=None):
 
     def latest_command_payload(raw_board_name):
         state = command_state_for_board(raw_board_name)
-        return dict(state['payload'])
+        payload = dict(state['payload'])
+        payload['control_active'] = board_has_active_session(raw_board_name)
+        if not payload['control_active']:
+            payload.update(throttle=0.0, steering=0.0, stop=True, action='stop')
+        return payload
 
     def set_latest_command(raw_board_name, payload, *, force=False):
         key = board_key(raw_board_name)

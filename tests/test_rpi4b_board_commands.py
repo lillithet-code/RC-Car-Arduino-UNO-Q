@@ -40,7 +40,7 @@ def test_throttle_changes_apply_immediately_without_scaling(driver, monkeypatch)
     # No elapsed time is needed, even when reversing or reducing throttle.
     monkeypatch.setattr(commands.time, 'monotonic', lambda: 100.0)
     for throttle in (1.0, 0.3, -1.0, -0.4, 0.0, 1.0):
-        assert driver.apply_state(throttle=throttle)
+        assert driver.apply_state(control_active=True, throttle=throttle)
         assert_motor_output(driver, max(throttle, 0.0), max(-throttle, 0.0))
 
 
@@ -49,7 +49,7 @@ def test_throttle_changes_apply_immediately_without_scaling(driver, monkeypatch)
     (-2.0, 0.0, 1.0),
 ])
 def test_throttle_stays_within_physical_pwm_range(driver, throttle, forward, reverse):
-    assert driver.apply_state(throttle=throttle)
+    assert driver.apply_state(control_active=True, throttle=throttle)
     assert_motor_output(driver, forward, reverse)
 
 
@@ -64,24 +64,24 @@ def test_discrete_actions_use_full_motor_output(driver, action, forward, reverse
 
 
 def test_stop_and_emergency_stop_remain_immediate(driver):
-    driver.apply_state(throttle=1.0)
-    driver.apply_state(throttle=1.0, stop=True)
+    driver.apply_state(control_active=True, throttle=1.0)
+    driver.apply_state(control_active=True, throttle=1.0, stop=True)
     assert_motor_output(driver, 0.0, 0.0)
-    driver.apply_state(throttle=-1.0)
+    driver.apply_state(control_active=True, throttle=-1.0)
     driver.emergency_stop()
     assert_motor_output(driver, 0.0, 0.0)
     assert driver._servo.angle is None
 
 
 def test_idle_disables_steering_and_active_commands_restore_it(driver):
-    driver.apply_state(throttle=1.0, steering=0.0)
+    driver.apply_state(control_active=True, throttle=1.0, steering=0.0)
     assert driver._servo.angle == commands.SERVO_CENTER_ANGLE
-    driver.apply_state(throttle=0.0, steering=0.0, stop=True)
+    driver.apply_state(control_active=True, throttle=0.0, steering=0.0, stop=True)
     assert driver._servo.angle is None
     # Repeated server stop messages must not wake the servo.
-    driver.apply_state(throttle=0.0, steering=0.0, stop=True)
+    driver.apply_state(control_active=True, throttle=0.0, steering=0.0, stop=True)
     assert driver._servo.angle is None
-    driver.apply_state(throttle=0.0, steering=1.0, stop=True)
+    driver.apply_state(control_active=True, throttle=0.0, steering=1.0, stop=True)
     assert driver._servo.angle == commands.SERVO_RIGHT_ANGLE
     driver.apply_action('stop')
     assert driver._servo.angle is None
@@ -125,6 +125,7 @@ def test_parse_desired_state_accepts_valid_payload():
     state, error = commands.parse_desired_state(
         {
             'sequence': 10,
+            'control_active': True,
             'expires_in_ms': 500,
             'issued_at_ms': now_ms,
             'throttle': 0.7,
@@ -142,6 +143,25 @@ def test_parse_desired_state_accepts_valid_payload():
     assert state['steering'] == -0.25
     assert state['lights'] is True
     assert state['stop'] is False
+    assert state['control_active'] is True
+
+
+@pytest.mark.parametrize('active', [None, False, 'true', 1])
+def test_unconfirmed_control_cannot_enable_motor_or_steering(driver, active):
+    payload = {'sequence': 1, 'throttle': 1.0, 'steering': 1.0}
+    if active is not None:
+        payload['control_active'] = active
+    state, error = commands.parse_desired_state(payload, 0, 1000)
+    assert error is None
+    assert state['control_active'] is False
+    assert state['stop'] is True
+    assert state['throttle'] == state['steering'] == 0.0
+    driver.apply_state(control_active=True, throttle=1.0, steering=1.0)
+    driver.apply_state(throttle=1.0, steering=1.0, control_active=active)
+    assert_motor_output(driver, 0.0, 0.0)
+    assert driver._servo.angle is None
+    driver.apply_state(control_active=True, throttle=1.0, steering=1.0)
+    assert driver._servo.angle == commands.SERVO_RIGHT_ANGLE
 
 
 def test_parse_desired_state_rejects_expired_payload():

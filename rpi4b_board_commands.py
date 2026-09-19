@@ -256,7 +256,11 @@ class CarGPIODriver:
 
         return False
 
-    def apply_state(self, throttle=0.0, steering=0.0, lights=False, stop=False):
+    def apply_state(self, throttle=0.0, steering=0.0, lights=False, stop=False, control_active=False):
+        # Fail closed at boot and when talking to a server without session status.
+        if control_active is not True:
+            self.emergency_stop(keep_lights=True)
+            return True
         if self.dry_run:
             print(
                 f'gpio state throttle={float(throttle):.3f} steering={float(steering):.3f} '
@@ -397,6 +401,11 @@ def parse_desired_state(payload, last_sequence, now_ms):
     throttle = max(-1.0, min(1.0, throttle))
     steering = max(-1.0, min(1.0, steering))
     stop = bool(payload.get('stop', False) or abs(throttle) < 1e-6)
+    control_active = payload.get('control_active') is True
+    if not control_active:
+        throttle = 0.0
+        steering = 0.0
+        stop = True
 
     state = {
         'sequence': sequence,
@@ -405,6 +414,7 @@ def parse_desired_state(payload, last_sequence, now_ms):
         'steering': steering,
         'lights': bool(payload.get('lights', False)),
         'stop': stop,
+        'control_active': control_active,
     }
     return state, None
 
@@ -454,6 +464,7 @@ def main():
                     steering=desired_state['steering'],
                     lights=desired_state['lights'],
                     stop=desired_state['stop'],
+                    control_active=desired_state['control_active'],
                 ):
                     last_sequence = desired_state['sequence']
                     watchdog_deadline = time.monotonic() + (MOTOR_WATCHDOG_MS / 1000.0)

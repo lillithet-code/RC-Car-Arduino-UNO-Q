@@ -110,6 +110,7 @@ Raspberry Pi 4B + Pi Camera 3 variables:
 Raspberry Pi PWM note:
 - Throttle is applied immediately and linearly over the full duty-cycle range in both directions; there is no board-side acceleration ramp or speed cap.
 - Steering PWM stays off at startup, while stopped with neutral steering, and after watchdog/disconnect stops. Driving or explicit steering input resumes PWM automatically; the unpowered servo does not actively hold or center the wheels.
+- The Pi also requires an explicit `control_active: true` from the server before enabling motor or steering output. Missing session status keeps outputs disabled. Update the server and Pi together; an older server cannot enable the updated Pi. This controls the running service, not GPIO behavior during boot before the service starts.
 - Legacy `FORWARD_THROTTLE`, `BACK_THROTTLE`, and `MOTOR_ACCELERATION_SECONDS` environment settings are ignored and no longer written by the installer.
 - For true PWM throttle with gpiozero, use PWM-capable GPIO pins (`12`, `13`, `18`, `19`).
 - If a non-PWM pin is configured, the runtime falls back to digital on/off throttle for that channel.
