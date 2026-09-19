@@ -186,6 +186,7 @@
             </fieldset>
             {% endif %}
             <p id="control-status" class="control-status" role="status" aria-live="polite"></p>
+            <p class="control-status">Drive with W/S or ↑/↓. Steer with A/D or ←/→. Release keys to stop.</p>
           </div>
         </div>
       {% else %}
@@ -1002,6 +1003,7 @@
     }
 
     function sendDesiredState(partialState, force = false) {
+      if (!hasActiveSession) return;
       currentDesiredState = {
         ...currentDesiredState,
         ...(partialState || {}),
@@ -1040,8 +1042,67 @@
       });
     }
 
+    // Keyboard controls share the joystick command and heartbeat path.
+    const heldDriveKeys = new Set();
+    const driveKeyAxes = {
+      w: [1, 0], arrowup: [1, 0], s: [-1, 0], arrowdown: [-1, 0],
+      a: [0, -1], arrowleft: [0, -1], d: [0, 1], arrowright: [0, 1],
+    };
+
+    function keyboardTargetIsEditable(target) {
+      return Boolean(target && target.closest && target.closest('input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"])'));
+    }
+
+    function applyKeyboardState() {
+      const values = [...heldDriveKeys].map(key => driveKeyAxes[key]);
+      // Aliases count as one direction, and opposite directions cancel.
+      const throttle = Number(values.some(axis => axis[0] === 1)) - Number(values.some(axis => axis[0] === -1));
+      const steering = Number(values.some(axis => axis[1] === 1)) - Number(values.some(axis => axis[1] === -1));
+      if (knob) {
+        knob.style.left = `${75 + steering * 55}px`;
+        knob.style.top = `${75 - throttle * 55}px`;
+      }
+      sendDesiredState({ throttle, steering, stop: throttle === 0 }, true);
+    }
+
+    function clearDrivingInput() {
+      heldDriveKeys.clear();
+      endJoystickDrag(false);
+      resetKnob(knob);
+      currentDesiredState = { ...currentDesiredState, throttle: 0, steering: 0, stop: true };
+      if (hasActiveSession) sendDesiredState(currentDesiredState, true);
+    }
+
+    window.addEventListener('keydown', event => {
+      const key = event.key.toLowerCase();
+      if (!Object.hasOwn(driveKeyAxes, key) || !hasActiveSession || document.hidden ||
+          event.ctrlKey || event.metaKey || event.altKey || keyboardTargetIsEditable(event.target)) return;
+      event.preventDefault();
+      if (event.repeat || heldDriveKeys.has(key)) return;
+      endJoystickDrag(false);
+      heldDriveKeys.add(key);
+      applyKeyboardState();
+    });
+    window.addEventListener('keyup', event => {
+      const key = event.key.toLowerCase();
+      if (!heldDriveKeys.delete(key)) return;
+      event.preventDefault();
+      applyKeyboardState();
+    });
+    window.addEventListener('blur', clearDrivingInput);
+    window.addEventListener('pagehide', clearDrivingInput);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) clearDrivingInput();
+    });
+    document.addEventListener('focusin', event => {
+      if (keyboardTargetIsEditable(event.target)) clearDrivingInput();
+    });
+    // End keyboard controls.
+
     if (joystick && knob) {
       joystick.addEventListener('pointerdown', (event) => {
+      if (!hasActiveSession) return;
+      heldDriveKeys.clear();
       dragging = true;
       fullscreenPointerId = event.pointerId;
       activeJoystick = { joystick, knob };
@@ -1070,6 +1131,7 @@
         if (event.target && event.target.closest && event.target.closest('#fullscreen-toggle')) {
           return;
         }
+        heldDriveKeys.clear();
         dragging = true;
         fullscreenPointerId = event.pointerId;
         activeJoystick = { joystick: fullscreenJoystick, knob: fullscreenKnob };
@@ -1107,7 +1169,7 @@
 
     document.addEventListener('fullscreenchange', () => {
       if (!isFullscreenActive()) {
-        endJoystickDrag(true);
+        clearDrivingInput();
       }
       updateFullscreenToggleLabel();
       renderStreamDiagnostics();
@@ -1115,9 +1177,10 @@
 
     setInterval(() => {
       if (!hasActiveSession) {
+        clearDrivingInput();
         return;
       }
-      if (dragging || !currentDesiredState.stop) {
+      if (dragging || heldDriveKeys.size || !currentDesiredState.stop) {
         sendDesiredState(currentDesiredState, true);
       }
     }, commandHeartbeatIntervalMs);
