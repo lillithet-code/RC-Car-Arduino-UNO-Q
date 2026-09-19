@@ -413,6 +413,7 @@ def build_libcamera_command(camera_mode, camera_index):
     command = [
         PICAMERA_BIN,
         '--nopreview',
+        '--rotation', '180',
         '--inline',
         '--codec', 'h264',
         '--intra', str(max(1, int(round(camera_mode.fps)))),
