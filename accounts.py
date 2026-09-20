@@ -35,12 +35,14 @@ class AccountMail:
     def __init__(self, app):
         self.app = app
 
-    def send(self, recipient, subject, body):
+    def send(self, recipient, subject, body, *, html=None):
         message = EmailMessage()
         message['From'] = self.app.config['SMTP_FROM']
         message['To'] = recipient
         message['Subject'] = subject
         message.set_content(body)
+        if html is not None:
+            message.add_alternative(html, subtype='html')
         # Only tests can intercept mail. Production never logs passwords or links.
         if self.app.testing and self.app.config.get('ACCOUNT_MAIL_SENDER'):
             self.app.config['ACCOUNT_MAIL_SENDER'](message)
@@ -132,14 +134,16 @@ def init_accounts(app, get_db, release_control):
                        (digest, user['id'], purpose, int(time.time()) + ttl, user['auth_version']))
         route = 'confirm_email' if purpose == 'verify' else 'reset_password'
         link = base + url_for(route, token=token)
+        html = None
         if purpose == 'verify':
             subject = 'Confirm your RC Car email address'
             body = f'Confirm your email address to enable your RC Car account:\n\n{link}\n\nThis link expires in 24 hours.\n\nIf you did not create this account, ignore this email.'
+            html = render_template('emails/confirm_email.html', confirmation_url=link)
         else:
             subject = 'Reset your RC Car password'
             body = f'Choose a new password for your RC Car account:\n\n{link}\n\nThis link expires in 30 minutes and can be used once.\n\nIf you did not request this, ignore this email. Your password has not changed.'
         try:
-            mail.send(user['email'], subject, body)
+            mail.send(user['email'], subject, body, html=html)
         except (AccountMailError, ValueError):
             with db:
                 db.execute('DELETE FROM account_tokens WHERE token_hash=?', (digest,))

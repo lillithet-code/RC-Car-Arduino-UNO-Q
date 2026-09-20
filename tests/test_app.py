@@ -53,7 +53,7 @@ def register_driver(client, data, **kwargs):
     result = auth_post(client, '/register', data)
     assert result.status_code == 303
     message = client.application.extensions['test_outbox'][-1]
-    link = re.search(r'https://[^\s]+', message.get_content())[0]
+    link = re.search(r'https://[^\s]+', message.get_body(preferencelist=('plain',)).get_content())[0]
     assert auth_post(client, urlsplit(link).path, {}).status_code == 200
     path = client.application.config['DATABASE_URL'].replace('sqlite:///', '', 1)
     with sqlite3.connect(path) as db:

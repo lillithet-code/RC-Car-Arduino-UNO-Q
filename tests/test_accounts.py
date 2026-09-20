@@ -40,7 +40,7 @@ def register(client, email='Alice@example.com'):
 
 
 def link(outbox):
-    return urlsplit(re.search(r'https://\S+', outbox[-1].get_content())[0]).path
+    return urlsplit(re.search(r'https://\S+', outbox[-1].get_body(preferencelist=('plain',)).get_content())[0]).path
 
 
 def verify(client, outbox):
@@ -65,7 +65,13 @@ def test_new_account_requires_email_and_starts_zero(setup):
     with client.session_transaction() as session:
         assert 'user_id' not in session
     assert outbox[-1]['To'] == 'alice@example.com'
-    assert 'https://drive.example/confirm-email/' in outbox[-1].get_content()
+    assert 'https://drive.example/confirm-email/' in outbox[-1].get_body(preferencelist=('plain',)).get_content()
+    message = outbox[-1]
+    assert message.get_content_type() == 'multipart/alternative'
+    html = message.get_body(preferencelist=('html',)).get_content()
+    assert '>confirm</a>' in html
+    assert f'href="https://drive.example{link(outbox)}"' in html
+    assert 'New accounts start with 0 minutes.' not in html
     assert post(client, '/login', {'username': 'alice', 'password': 'secret123'}).status_code == 403
     assert client.get('/buy-minutes').status_code == 302
     url = link(outbox)
