@@ -21,7 +21,10 @@
     .session-layout { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; }
     .video-panel { flex: 1 1 0; min-width: 320px; }
     .video-stage { position: relative; width: 100%; max-width: 720px; }
-    .stream-surface { width: 100%; position: relative; }
+    .stream-surface { width: 100%; position: relative; min-height: 180px; }
+    .stream-connecting { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; background: #0f172a; border: 2px solid #334155; border-radius: 20px; font-size: 1.25rem; pointer-events: none; }
+    .stream-connecting[hidden] { display: none; }
+    .connecting-dots { display: inline-block; width: 1.5em; text-align: left; }
     .joystick-panel { width: 260px; display: flex; flex-direction: column; align-items: center; }
     .stream { width: 100%; max-width: 720px; border-radius: 20px; border: 2px solid #334155; }
     .fullscreen-toggle {
@@ -162,6 +165,9 @@
               <a href="#" id="fullscreen-toggle" class="fullscreen-toggle">Fullscreen</a>
               <div id="fullscreen-time" class="fullscreen-time"></div>
               <div class="stream-surface">
+                <div id="stream-connecting" class="stream-connecting" role="status" aria-label="Connecting to live video">
+                  <span aria-hidden="true">Connecting<span id="connecting-dots" class="connecting-dots"></span></span>
+                </div>
                 <video id="stream-video" class="stream" autoplay playsinline muted style="display:none;"></video>
               </div>
               <div class="joystick fullscreen-joystick" id="fullscreen-joystick">
@@ -231,6 +237,9 @@
     const fullscreenJoystick = document.getElementById('fullscreen-joystick');
     const fullscreenKnob = document.getElementById('fullscreen-knob');
     const streamVideo = document.getElementById('stream-video');
+    const streamConnecting = document.getElementById('stream-connecting');
+    const connectingDots = document.getElementById('connecting-dots');
+    let connectingDotCount = 0;
     const streamDiagnostics = document.getElementById('stream-diagnostics');
     const controlStatus = document.getElementById('control-status');
     const remainingTime = document.getElementById('remaining-time');
@@ -609,6 +618,18 @@
         return Boolean(streamVideo && streamVideo.readyState >= 2 && !streamVideo.paused && streamVideo.videoWidth > 0);
       }
       return false;
+    }
+
+    function updateConnectingIndicator() {
+      if (!streamConnecting) return;
+      streamConnecting.hidden = isStreamActuallyVisible();
+      if (streamConnecting.hidden) {
+        connectingDotCount = 0;
+        connectingDots.textContent = '';
+      } else {
+        connectingDotCount = (connectingDotCount + 1) % 4;
+        connectingDots.textContent = '.'.repeat(connectingDotCount);
+      }
     }
 
     async function postStreamVisibility() {
@@ -993,6 +1014,7 @@
       pollSessionStatus();
       setInterval(pollSessionStatus, 1000);
       setInterval(() => {
+        updateConnectingIndicator();
         if (usingWebRTC && streamVideo && streamVideo.paused) {
           streamVideo.play().catch(() => {});
         }
