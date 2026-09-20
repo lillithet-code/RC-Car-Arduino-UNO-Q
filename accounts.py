@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from urllib.parse import urlparse
 
-from flask import abort, redirect, render_template, request, session, url_for
+from flask import abort, flash, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -205,7 +205,8 @@ def init_accounts(app, get_db, release_control):
                 send_link(user, 'verify')
             except AccountMailError:
                 return page('notice', message='Your account was created, but the confirmation email could not be sent. Your account remains disabled. Use Resend confirmation once email delivery is available.'), 503
-            return page('notice', message='Check your inbox for the confirmation link. Confirm your email before signing in. Your account starts with 0 minutes.')
+            flash('Confirm your email to enable your account.', 'registration')
+            return redirect(url_for('login'), code=303)
         return render_template('register.html')
 
     @app.route('/login', methods=['GET', 'POST'])

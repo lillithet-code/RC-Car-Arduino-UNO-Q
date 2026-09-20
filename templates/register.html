@@ -17,7 +17,6 @@
 <body>
   <div class="box">
     <h1>Create account</h1>
-    <p>Confirm your email to enable your account. New accounts start with 0 minutes.</p>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     <form method="post">
       <input type="hidden" name="csrf_token" value="{{ account_csrf() }}">
@@ -33,4 +32,3 @@
   </div>
 </body>
 </html>
-

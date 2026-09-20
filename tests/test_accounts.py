@@ -49,7 +49,16 @@ def verify(client, outbox):
 
 def test_new_account_requires_email_and_starts_zero(setup):
     app, client, db, outbox = setup
-    assert register(client).status_code == 200
+    registration_page = client.get('/register').get_data(as_text=True)
+    assert 'Confirm your email to enable your account.' not in registration_page
+    assert 'New accounts start with 0 minutes.' not in registration_page
+    response = register(client)
+    assert response.status_code == 303 and response.location == '/login'
+    login_page = client.get(response.location).get_data(as_text=True)
+    assert 'Confirm your email to enable your account.' in login_page
+    assert 'New accounts start with 0 minutes.' not in login_page
+    assert 'name="password"' in login_page
+    assert 'Confirm your email to enable your account.' not in client.get('/login').get_data(as_text=True)
     user = db.execute('SELECT * FROM users').fetchone()
     assert user['balance'] == 0 and user['email_verified'] == 0
     assert user['email'] == 'alice@example.com'
@@ -250,7 +259,7 @@ def test_smtp_uses_tls_before_credentials_and_sends_message(setup, monkeypatch, 
     app.config.update(ACCOUNT_MAIL_SENDER=None, SMTP_HOST='smtp.example.com', SMTP_PORT=str(port),
                       SMTP_SECURITY=security, SMTP_FROM='sender@example.com',
                       SMTP_USERNAME='sender@example.com', SMTP_PASSWORD='mail-password')
-    assert register(client).status_code == 200
+    assert register(client).status_code == 303
     assert events == (['connect','tls','login','send'] if security == 'starttls' else ['connect','login','send'])
 
 

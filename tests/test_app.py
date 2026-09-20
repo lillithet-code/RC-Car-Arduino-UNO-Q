@@ -51,7 +51,7 @@ def register_driver(client, data, **kwargs):
     # Driving tests explicitly verify the account and seed time. Production
     # registrations always start unverified with zero minutes.
     result = auth_post(client, '/register', data)
-    assert result.status_code == 200
+    assert result.status_code == 303
     message = client.application.extensions['test_outbox'][-1]
     link = re.search(r'https://[^\s]+', message.get_content())[0]
     assert auth_post(client, urlsplit(link).path, {}).status_code == 200
