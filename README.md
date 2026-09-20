@@ -4,6 +4,8 @@ Remote RC car control stack with per-car session isolation, MediaMTX passthrough
 
 Users can buy 5, 10, 15, 20, 30 or 60 minutes using card checkout through Stripe. See [payment setup and package prices](PAYMENTS.md) for credentials, webhook configuration, testing and deployment instructions.
 
+New accounts start with **0 minutes** and require email confirmation before signing in. Password recovery and confirmation emails use your SMTP mailbox. See [Plesk email setup and account recovery](ACCOUNT_EMAIL.md) before enabling new registrations.
+
 ## What changed
 - UNO Q Linux publishes H.264 once to MediaMTX over RTSP.
 - Browser playback uses WebRTC WHEP from MediaMTX.

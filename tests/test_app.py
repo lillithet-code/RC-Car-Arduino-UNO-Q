@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import tempfile
+import sqlite3
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -17,19 +19,47 @@ from app import create_app, resolve_command_ws_sleep_seconds
 def client():
     db_fd, db_path = tempfile.mkstemp()
     os.environ['DATABASE_URL'] = f'sqlite:///{db_path}'
+    outbox = []
     app = create_app({
         'TESTING': True,
+        'ACCOUNT_MAIL_SENDER': lambda message: outbox.append(message),
         'STREAM_READY_MIN_FRAMES': 1,
         'STREAM_READY_WINDOW_SECONDS': 2.0,
         'MEDIAMTX_TEST_PATH_STATES': {},
         'BOARD_TOKEN': 'dev-board-token',
     })
     app.config['TESTING'] = True
+    app.extensions['test_outbox'] = outbox
     with app.test_client() as client:
         client.environ_base['HTTP_AUTHORIZATION'] = 'Bearer dev-board-token'
         yield client
     os.close(db_fd)
     os.unlink(db_path)
+
+
+def auth_post(client, route, data, **kwargs):
+    html = client.get(route).get_data(as_text=True)
+    token = re.search(r'name="csrf_token" value="([^"]+)"', html)[1]
+    return client.post(route, data=dict(data, csrf_token=token), **kwargs)
+
+
+def login_driver(client, data, **kwargs):
+    return auth_post(client, '/login', data, **kwargs)
+
+
+def register_driver(client, data, **kwargs):
+    # Driving tests explicitly verify the account and seed time. Production
+    # registrations always start unverified with zero minutes.
+    result = auth_post(client, '/register', data)
+    assert result.status_code == 200
+    message = client.application.extensions['test_outbox'][-1]
+    link = re.search(r'https://[^\s]+', message.get_content())[0]
+    assert auth_post(client, urlsplit(link).path, {}).status_code == 200
+    path = client.application.config['DATABASE_URL'].replace('sqlite:///', '', 1)
+    with sqlite3.connect(path) as db:
+        db.execute('UPDATE users SET balance=600 WHERE username=?', (data['username'],))
+    db.close()
+    return login_driver(client, {'username': data['username'], 'password': data['password']}, **kwargs)
 
 
 def mark_board_online(client, board_name):
@@ -98,7 +128,7 @@ def test_command_ws_sleep_uses_assigned_idle_interval_when_stopped():
 
 
 def test_register_and_login(client):
-    response = client.post('/register', data={
+    response = register_driver(client, data={
         'username': 'alice',
         'password': 'secret123',
         'email': 'alice@example.com'
@@ -106,7 +136,7 @@ def test_register_and_login(client):
     assert response.status_code == 200
     assert b'Welcome, alice' in response.data
 
-    response = client.post('/login', data={
+    response = login_driver(client, data={
         'username': 'alice',
         'password': 'secret123'
     }, follow_redirects=True)
@@ -127,7 +157,7 @@ def test_device_registration_requires_board_token(client):
 
 
 def test_inactive_user_is_logged_out_after_timeout(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'carol',
         'password': 'secret123',
         'email': 'carol@example.com'
@@ -142,12 +172,12 @@ def test_inactive_user_is_logged_out_after_timeout(client):
 
 
 def test_device_registration_and_booking(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'bob',
         'password': 'secret123',
         'email': 'bob@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'bob',
         'password': 'secret123'
     })
@@ -170,12 +200,12 @@ def test_device_registration_and_booking(client):
 
 
 def test_request_car_does_not_double_charge_with_active_session(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'dave',
         'password': 'secret123',
         'email': 'dave@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'dave',
         'password': 'secret123'
     })
@@ -198,12 +228,12 @@ def test_request_car_does_not_double_charge_with_active_session(client):
 
 
 def test_release_car_refunds_unused_time(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'erin',
         'password': 'secret123',
         'email': 'erin@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'erin',
         'password': 'secret123'
     })
@@ -228,12 +258,12 @@ def test_release_car_refunds_unused_time(client):
 
 
 def test_session_countdown_starts_after_stream_appears(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'frank',
         'password': 'secret123',
         'email': 'frank@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'frank',
         'password': 'secret123'
     })
@@ -276,12 +306,12 @@ def test_session_countdown_starts_after_stream_appears(client):
 
 
 def test_stream_loss_refunds_and_allows_new_request(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'gary',
         'password': 'secret123',
         'email': 'gary@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'gary',
         'password': 'secret123'
     })
@@ -324,12 +354,12 @@ def test_stream_loss_refunds_and_allows_new_request(client):
 
 
 def test_session_start_requires_stream_ready(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'ruth',
         'password': 'secret123',
         'email': 'ruth@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'ruth',
         'password': 'secret123'
     })
@@ -355,12 +385,12 @@ def test_session_start_requires_stream_ready(client):
 
 
 def test_session_start_rejects_ready_but_frozen_stream(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'frozen',
         'password': 'secret123',
         'email': 'frozen@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'frozen',
         'password': 'secret123'
     })
@@ -390,12 +420,12 @@ def test_session_start_rejects_ready_but_frozen_stream(client):
 
 
 def test_billing_pauses_when_ready_stream_stops_receiving_bytes(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'stalled',
         'password': 'secret123',
         'email': 'stalled@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'stalled',
         'password': 'secret123'
     })
@@ -427,12 +457,12 @@ def test_billing_pauses_when_ready_stream_stops_receiving_bytes(client):
 
 
 def test_billing_pauses_when_stream_not_ready(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'sara',
         'password': 'secret123',
         'email': 'sara@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'sara',
         'password': 'secret123'
     })
@@ -467,12 +497,12 @@ def test_billing_pauses_when_stream_not_ready(client):
 
 
 def test_billing_requires_client_visibility_heartbeat(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'tina',
         'password': 'secret123',
         'email': 'tina@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'tina',
         'password': 'secret123'
     })
@@ -529,12 +559,12 @@ def test_billing_requires_client_visibility_heartbeat(client):
 
 
 def test_release_still_works_when_stream_never_started(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'nina',
         'password': 'secret123',
         'email': 'nina@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'nina',
         'password': 'secret123'
     })
@@ -563,12 +593,12 @@ def test_release_still_works_when_stream_never_started(client):
 
 
 def test_stream_urls_build_expected_whep_and_rtsp(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'uma',
         'password': 'secret123',
         'email': 'uma@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'uma',
         'password': 'secret123'
     })
@@ -590,12 +620,12 @@ def test_stream_urls_build_expected_whep_and_rtsp(client):
 
 
 def test_mediamtx_ready_offline_unreachable_statuses(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'vera',
         'password': 'secret123',
         'email': 'vera@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'vera',
         'password': 'secret123'
     })
@@ -623,12 +653,12 @@ def test_mediamtx_ready_offline_unreachable_statuses(client):
 
 
 def test_board_name_path_isolation(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'walt',
         'password': 'secret123',
         'email': 'walt@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'walt',
         'password': 'secret123'
     })
@@ -655,12 +685,12 @@ def test_board_name_path_isolation(client):
 
 
 def test_legacy_jpeg_heartbeat_does_not_make_rtsp_ready(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'xena',
         'password': 'secret123',
         'email': 'xena@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'xena',
         'password': 'secret123'
     })
@@ -683,7 +713,7 @@ def test_legacy_jpeg_heartbeat_does_not_make_rtsp_ready(client):
 
 
 def test_dashboard_has_webrtc_setup_inflight_guard(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'yuri',
         'password': 'secret123',
         'email': 'yuri@example.com'
@@ -699,12 +729,12 @@ def test_dashboard_has_webrtc_setup_inflight_guard(client):
 
 
 def test_request_car_allows_partial_session_when_balance_under_default(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'helen',
         'password': 'secret123',
         'email': 'helen@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'helen',
         'password': 'secret123'
     })
@@ -766,12 +796,12 @@ def test_video_pipeline_stream_route_is_available(client):
 
 
 def test_board_commands_are_exposed_for_the_board_client(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'otto',
         'password': 'secret123',
         'email': 'otto@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'otto',
         'password': 'secret123'
     })
@@ -807,12 +837,12 @@ def test_board_commands_are_exposed_for_the_board_client(client):
 
 
 def test_release_car_overwrites_motion_with_stop(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'safety',
         'password': 'secret123',
         'email': 'safety@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'safety',
         'password': 'secret123'
     })
@@ -842,12 +872,12 @@ def test_unassigned_board_has_no_control_permission(client):
 
 
 def test_logout_overwrites_motion_with_stop(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'logoutsafe',
         'password': 'secret123',
         'email': 'logoutsafe@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'logoutsafe',
         'password': 'secret123'
     })
@@ -869,12 +899,12 @@ def test_logout_overwrites_motion_with_stop(client):
 
 
 def test_stream_lost_overwrites_motion_with_stop(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'losssafe',
         'password': 'secret123',
         'email': 'losssafe@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'losssafe',
         'password': 'secret123'
     })
@@ -901,12 +931,12 @@ def test_stream_lost_overwrites_motion_with_stop(client):
 
 
 def test_board_stream_status_keeps_unassigned_online_boards_disabled(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'ivy',
         'password': 'secret123',
         'email': 'ivy@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'ivy',
         'password': 'secret123'
     })
@@ -933,12 +963,12 @@ def test_board_stream_status_reflects_active_sessions(client):
     assert inactive_payload['enabled'] is False
     assert 'board_active' in inactive_payload
 
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'ivy',
         'password': 'secret123',
         'email': 'ivy@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'ivy',
         'password': 'secret123'
     })
@@ -969,12 +999,12 @@ def test_board_status_endpoint_reports_liveness(client):
 
 
 def test_admin_shows_all_reported_pi_stream_options(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'adminpi',
         'password': 'secret123',
         'email': 'adminpi@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'adminpi',
         'password': 'secret123'
     })
@@ -1018,12 +1048,12 @@ def test_admin_shows_all_reported_pi_stream_options(client):
 
 
 def test_admin_saves_pi_encoder_from_reported_options(client):
-    client.post('/register', data={
+    register_driver(client, data={
         'username': 'adminsave',
         'password': 'secret123',
         'email': 'adminsave@example.com'
     })
-    client.post('/login', data={
+    login_driver(client, data={
         'username': 'adminsave',
         'password': 'secret123'
     })

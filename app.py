@@ -17,8 +17,8 @@ from urllib import request as urllib_request
 from flask import Flask, g, redirect, render_template, request, session, url_for, jsonify, Response
 from flask_sock import Sock
 from payments import init_payments
+from accounts import init_accounts
 from simple_websocket import ConnectionClosed
-from werkzeug.security import generate_password_hash, check_password_hash
 
 
 def _extract_mediamtx_tracks(payload):
@@ -220,6 +220,9 @@ def create_app(test_config=None):
             ''')
             ensure_column('users', 'is_admin', 'INTEGER DEFAULT 0')
             ensure_column('users', 'balance', 'INTEGER DEFAULT 0')
+            # Grandfather existing accounts; registration explicitly inserts unverified.
+            ensure_column('users', 'email_verified', 'INTEGER NOT NULL DEFAULT 1')
+            ensure_column('users', 'auth_version', 'INTEGER NOT NULL DEFAULT 0')
             ensure_column('sessions', 'billing_started_at', 'TEXT')
             ensure_column('sessions', 'allocated_seconds', "INTEGER DEFAULT 300")
             ensure_column('sessions', 'consumed_seconds', 'INTEGER DEFAULT 0')
@@ -431,6 +434,7 @@ def create_app(test_config=None):
 
     init_db()
     init_payments(app, get_db)
+    init_accounts(app, get_db, release_user_control_session)
 
     default_board_name = '__default__'
     stream_states = {}
@@ -1092,7 +1096,7 @@ def create_app(test_config=None):
             if (now - last_activity_dt).total_seconds() > timeout_seconds:
                 release_user_control_session(session['user_id'], new_status='timeout')
                 session.clear()
-                if request.path not in ('/login', '/register', '/logout') and not request.path.startswith('/static'):
+                if request.endpoint not in ('login', 'register', 'logout', 'forgot_password', 'resend_confirmation', 'confirm_email', 'reset_password') and not request.path.startswith('/static'):
                     return redirect(url_for('login'))
 
             session['last_activity'] = now.isoformat()
@@ -1107,43 +1111,6 @@ def create_app(test_config=None):
             latest = db.execute('SELECT status FROM sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1', (user['id'],)).fetchone()
             return render_template('dashboard.html', user=user, active_session=active_session, remaining_seconds=remaining_seconds, maintenance_notice=latest and latest['status'] == 'admin_offline')
         return redirect(url_for('login'))
-
-    @app.route('/register', methods=['GET', 'POST'])
-    def register():
-        if request.method == 'POST':
-            username = request.form['username']
-            email = request.form['email']
-            password = request.form['password']
-            db = get_db()
-            try:
-                user_count = db.execute('SELECT COUNT(*) as count FROM users').fetchone()['count']
-                is_admin = 1 if user_count == 0 else 0
-                db.execute(
-                    'INSERT INTO users (username, email, password_hash, balance, is_admin) VALUES (?, ?, ?, ?, ?)',
-                    (username, email, generate_password_hash(password), 600, is_admin)
-                )
-                db.commit()
-                user = db.execute('SELECT id, username FROM users WHERE username = ?', (username,)).fetchone()
-                session['user_id'] = user['id']
-                session['last_activity'] = datetime.now(timezone.utc).isoformat()
-                return redirect(url_for('index'))
-            except sqlite3.IntegrityError:
-                return render_template('register.html', error='Username or email already exists')
-        return render_template('register.html')
-
-    @app.route('/login', methods=['GET', 'POST'])
-    def login():
-        if request.method == 'POST':
-            username = request.form['username']
-            password = request.form['password']
-            db = get_db()
-            user = db.execute('SELECT id, username, password_hash FROM users WHERE username = ?', (username,)).fetchone()
-            if user and check_password_hash(user['password_hash'], password):
-                session['user_id'] = user['id']
-                session['last_activity'] = datetime.now(timezone.utc).isoformat()
-                return redirect(url_for('index'))
-            return render_template('login.html', error='Invalid username or password')
-        return render_template('login.html')
 
     @app.route('/logout')
     def logout():

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>RC Car account</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
+    .box { max-width: 460px; margin: 4rem auto; background: #111827; padding: 2rem; border-radius: 16px; }
+    p { line-height: 1.6; }
+    input { width: 100%; margin: 0.4rem 0 1rem; padding: 0.7rem; border-radius: 8px; border: 1px solid #334155; }
+    button { padding: 0.8rem 1rem; border-radius: 8px; background: #2563eb; color: white; border: 0; cursor: pointer; }
+    .error { color: #fca5a5; }
+    a { color: #93c5fd; }
+    @media (max-width: 500px) { .box { margin: 1rem; padding: 1.4rem; } }
+  </style>
+</head>
+<body>
+  <main class="box">
+    {% if kind == 'forgot' %}<h1>Forgot your password?</h1><p>Enter your account email and we’ll send a password-reset link.</p>
+    {% elif kind == 'resend' %}<h1>Resend confirmation</h1><p>Enter your account email to request a new confirmation link.</p>
+    {% elif kind == 'confirm' %}<h1>Confirm your email</h1><p>Press the button below to enable your account.</p>
+    {% elif kind == 'reset' %}<h1>Choose a new password</h1>
+    {% elif kind == 'invalid' %}<h1>Link unavailable</h1>
+    {% else %}<h1>Your account</h1>{% endif %}
+    {% if message %}<p role="status">{{ message }}</p>{% endif %}
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    {% if kind in ('forgot', 'resend', 'confirm', 'reset') %}
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ account_csrf() }}">
+      {% if kind in ('forgot', 'resend') %}
+      <label for="email">Email address</label>
+      <input id="email" name="email" type="email" autocomplete="email" maxlength="254" required>
+      {% elif kind == 'reset' %}
+      <label for="password">New password (8–128 characters)</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+      <label for="password-confirm">Confirm new password</label>
+      <input id="password-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+      {% endif %}
+      <button type="submit">{{ 'Confirm email' if kind == 'confirm' else 'Save new password' if kind == 'reset' else 'Send reset link' if kind == 'forgot' else 'Send confirmation link' }}</button>
+    </form>
+    {% endif %}
+    <p><a href="{{ url_for('login') }}">Back to sign in</a></p>
+    {% if kind in ('notice', 'invalid') %}
+    <p><a href="{{ url_for('resend_confirmation') }}">Resend confirmation</a> · <a href="{{ url_for('forgot_password') }}">Request password reset</a></p>
+    {% endif %}
+  </main>
+</body>
+</html>
