@@ -67,7 +67,7 @@
 
     <div class="card">
       <h2>Vehicles</h2>
-      <button type="button" class="availability-button" data-all="true" data-online="{{ 'true' if all_offline else 'false' }}">{{ 'Set all cars online' if all_offline else 'Take all cars offline in 10 seconds' }}</button>
+      <button type="button" class="availability-button" data-all="true" data-online="{{ 'true' if all_offline else 'false' }}">{{ 'Set all cars online' if all_offline else 'Set All Offline' }}</button>
       <p id="availability-feedback" role="status" aria-live="polite"></p>
       <table>
         <thead>
@@ -86,7 +86,7 @@
             <td>
               <span>{{ device.status }}</span>
               {% if device.admin_offline_at %}<p class="offline-countdown" data-deadline="{{ device.admin_offline_at }}" role="status"></p>{% endif %}
-              <button type="button" class="availability-button" data-device-id="{{ device.id }}" data-online="{{ 'true' if device.admin_offline_at else 'false' }}">{{ 'Set online / cancel shutdown' if device.admin_offline_at else 'Take offline in 10 seconds' }}</button>
+              <button type="button" class="availability-button" data-device-id="{{ device.id }}" data-online="{{ 'true' if device.admin_offline_at else 'false' }}">{{ 'Set online / cancel shutdown' if device.admin_offline_at else 'Set Offline' }}</button>
             </td>
             <td>{{ device.location }}</td>
             <td>
