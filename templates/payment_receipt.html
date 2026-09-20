@@ -4,12 +4,14 @@
   <h1>{{ 'Your minutes are ready' if purchase.status == 'paid' else 'Purchase status' }}</h1>
   <div class="card">
     <h2>{{ purchase.minutes }} minutes · ${{ '%.2f'|format(purchase.amount_cents / 100) }} USD</h2>
-    <p>Payment method: {{ 'PayPal' if purchase.provider == 'paypal' else 'Stripe' }}</p>
+    <p>Payment method: {{ purchase.provider|title }}</p>
     {% if message %}<p class="notice" role="status">{{ message }}</p>{% endif %}
     {% if purchase.status == 'paid' %}
       <p class="success" role="status">Payment confirmed. {{ purchase.minutes }} minutes have been added to your balance.</p>
       <p>Your minutes are available for your next booking.</p>
       <a href="{{ url_for('index') }}">Back to the cars →</a>
+    {% elif purchase.provider != 'stripe' %}
+      <p class="notice" role="status">This payment method is no longer supported. Contact the administrator if you already paid for this purchase.</p>
     {% else %}
       <p class="notice" role="status">Waiting for payment confirmation. This page checks for updates automatically.</p>
       <p>If you have already paid, allow a moment for confirmation. Do not start another purchase for the same payment. The button below checks this purchase before reopening checkout.</p>
@@ -23,7 +25,7 @@
   <a href="{{ url_for('payments.shop') }}">Packages and purchase history</a>
 {% endblock %}
 {% block scripts %}
-{% if purchase.status != 'paid' %}
+{% if purchase.status != 'paid' and purchase.provider == 'stripe' %}
 <script>
   let attempts = 0;
   async function checkPayment() {

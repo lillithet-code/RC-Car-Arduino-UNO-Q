@@ -1,13 +1,13 @@
 {% extends 'payment_base.html' %}
 {% block content %}
   <h1>More time behind the wheel</h1>
-  <p class="muted">Choose your driving time and pay securely with your preferred payment method. All prices are in USD.</p>
+  <p class="muted">Choose your driving time and pay securely by credit or debit card. All prices are in USD.</p>
   <p>Available balance: <strong>{{ user.balance // 60 }} min {{ user.balance % 60 }} sec</strong></p>
   <form class="card" method="post" action="{{ url_for('payments.checkout') }}" id="purchase-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="checkout_token" value="{{ checkout_token }}">
     <fieldset>
-      <legend>1. Choose a minute package</legend>
+      <legend>Choose a minute package</legend>
       <div class="packages">
         {% for minutes, cents in packages.items() %}
         <label class="choice">
@@ -18,17 +18,8 @@
       </div>
     </fieldset>
     {% if providers %}
-    <fieldset>
-      <legend>2. Choose how to pay</legend>
-      <div class="methods">
-        {% for provider in providers %}
-        <label class="choice">
-          <input type="radio" name="provider" value="{{ provider }}" required {% if loop.first %}checked{% endif %}>
-          <span><strong>{{ 'PayPal' if provider == 'paypal' else 'Credit / debit card' }}</strong><span class="muted">{{ 'Pay with PayPal' if provider == 'paypal' else 'Secure checkout with Stripe' }}</span></span>
-        </label>
-        {% endfor %}
-      </div>
-    </fieldset>
+    <input type="hidden" name="provider" value="stripe">
+    <p><strong>Credit / debit card</strong> · Secure checkout with Stripe</p>
     <button type="submit" id="checkout-button">Continue to payment · $5.99 USD</button>
     <p class="muted">Minutes are added after payment is confirmed. New minutes are available for your next booking; buying a package does not extend a session already in progress.</p>
     {% else %}
@@ -44,7 +35,7 @@
       <tbody>{% for purchase in history %}<tr>
         <td><a href="{{ url_for('payments.receipt', purchase_id=purchase.id) }}">{{ purchase.created_at[:10] }}</a></td>
         <td>{{ purchase.minutes }} minutes</td><td>${{ '%.2f'|format(purchase.amount_cents / 100) }}</td>
-        <td>{{ 'PayPal' if purchase.provider == 'paypal' else 'Stripe' }}</td>
+        <td>{{ purchase.provider|title }}</td>
         <td class="{{ 'success' if purchase.status == 'paid' else 'tag' }}">{{ 'Minutes added' if purchase.status == 'paid' else 'Awaiting payment' }}</td>
       </tr>{% endfor %}</tbody>
     </table></div>

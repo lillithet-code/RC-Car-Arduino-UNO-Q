@@ -1,5 +1,4 @@
 """Server-priced minute purchases with hosted checkout and idempotent fulfillment."""
-import base64
 import hashlib
 import hmac
 import json
@@ -8,7 +7,6 @@ import re
 import secrets
 import time
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 from urllib import parse, request as http, error as http_error
 
 from flask import Blueprint, abort, jsonify, redirect, render_template, request, session, url_for
@@ -19,8 +17,6 @@ PACKAGES = {5: 599, 10: 1099, 15: 1499, 20: 1899, 30: 2599, 60: 5000}
 CONFIG_DEFAULTS = {
     'PAYMENTS_BASE_URL': 'https://drive.kbob.org',
     'STRIPE_SECRET_KEY': '', 'STRIPE_WEBHOOK_SECRET': '',
-    'PAYPAL_CLIENT_ID': '', 'PAYPAL_CLIENT_SECRET': '',
-    'PAYPAL_WEBHOOK_ID': '', 'PAYPAL_ENVIRONMENT': 'sandbox',
 }
 
 
@@ -52,16 +48,6 @@ def provider_id(value):
     return value
 
 
-def usd_cents(amount):
-    try:
-        value = Decimal(str(amount)) * 100
-        if not value.is_finite() or value != value.to_integral_value():
-            raise ValueError()
-        return int(value)
-    except (InvalidOperation, ValueError, TypeError):
-        raise PaymentError('Invalid payment amount')
-
-
 def stripe_signature_valid(body, header, secret, now=None):
     if not secret:
         return False
@@ -88,9 +74,6 @@ class Payments:
         c = self.app.config
         if provider == 'stripe':
             return bool(c['STRIPE_SECRET_KEY'] and c['STRIPE_WEBHOOK_SECRET'])
-        if provider == 'paypal':
-            return bool(c['PAYPAL_CLIENT_ID'] and c['PAYPAL_CLIENT_SECRET'] and c['PAYPAL_WEBHOOK_ID'] and
-                        c['PAYPAL_ENVIRONMENT'] in ('sandbox', 'live'))
         return False
 
     def base_url(self):
@@ -107,25 +90,12 @@ class Payments:
         return api_json('https://api.stripe.com/v1/' + path, method='POST' if data is not None else 'GET',
                         data=data, headers=headers, form=True)
 
-    def paypal(self, path, *, data=None, idempotency=None):
-        c = self.app.config
-        if c['PAYPAL_ENVIRONMENT'] not in ('sandbox', 'live'):
-            raise PaymentError('PayPal is not configured correctly.')
-        base = 'https://api-m.paypal.com' if c['PAYPAL_ENVIRONMENT'] == 'live' else 'https://api-m.sandbox.paypal.com'
-        auth = base64.b64encode(f"{c['PAYPAL_CLIENT_ID']}:{c['PAYPAL_CLIENT_SECRET']}".encode()).decode()
-        token = api_json(base + '/v1/oauth2/token', method='POST', data={'grant_type': 'client_credentials'},
-                         headers={'Authorization': 'Basic ' + auth}, form=True).get('access_token')
-        if not token:
-            raise PaymentError('PayPal authentication failed.')
-        headers = {'Authorization': 'Bearer ' + token}
-        if idempotency:
-            headers['PayPal-Request-Id'] = idempotency
-        return api_json(base + path, method='POST' if data is not None else 'GET', data=data, headers=headers)
-
     def purchase(self, purchase_id):
         return self.get_db().execute('SELECT * FROM minute_purchases WHERE id = ?', (purchase_id,)).fetchone()
 
     def checkout(self, purchase):
+        if purchase['provider'] != 'stripe':
+            raise PaymentError('This payment method is no longer supported.')
         if purchase['status'] == 'paid':
             return url_for('payments.receipt', purchase_id=purchase['id'])
         if purchase['checkout_url']:
@@ -133,32 +103,17 @@ class Payments:
         base = self.base_url()
         done = base + '/payments/return/' + purchase['id']
         cancel = base + '/payments/purchases/' + purchase['id'] + '?cancelled=1'
-        if purchase['provider'] == 'stripe':
-            result = self.stripe('checkout/sessions', data={
-                'mode': 'payment', 'payment_method_types[0]': 'card',
-                'client_reference_id': purchase['id'], 'metadata[purchase_id]': purchase['id'],
-                'line_items[0][price_data][currency]': 'usd',
-                'line_items[0][price_data][unit_amount]': purchase['amount_cents'],
-                'line_items[0][price_data][product_data][name]': f"RC Car — {purchase['minutes']} minutes",
-                'line_items[0][quantity]': 1,
-                'success_url': done + '?session_id={CHECKOUT_SESSION_ID}', 'cancel_url': cancel,
-            }, idempotency='checkout-' + purchase['id'])
-            checkout_url = result.get('url', '')
-            allowed_hosts = {'checkout.stripe.com'}
-        else:
-            result = self.paypal('/v2/checkout/orders', data={
-                'intent': 'CAPTURE',
-                'purchase_units': [{'custom_id': purchase['id'],
-                                    'description': f"RC Car — {purchase['minutes']} minutes",
-                                    'amount': {'currency_code': 'USD', 'value': f"{purchase['amount_cents'] / 100:.2f}"}}],
-                'payment_source': {'paypal': {'experience_context': {
-                    'brand_name': 'RC Car', 'shipping_preference': 'NO_SHIPPING',
-                    'user_action': 'PAY_NOW', 'return_url': done, 'cancel_url': cancel,
-                }}},
-            }, idempotency=purchase['id'])
-            checkout_url = next((link.get('href', '') for link in result.get('links', [])
-                                 if link.get('rel') in ('payer-action', 'approve')), '')
-            allowed_hosts = {'www.paypal.com', 'www.sandbox.paypal.com'}
+        result = self.stripe('checkout/sessions', data={
+            'mode': 'payment', 'payment_method_types[0]': 'card',
+            'client_reference_id': purchase['id'], 'metadata[purchase_id]': purchase['id'],
+            'line_items[0][price_data][currency]': 'usd',
+            'line_items[0][price_data][unit_amount]': purchase['amount_cents'],
+            'line_items[0][price_data][product_data][name]': f"RC Car — {purchase['minutes']} minutes",
+            'line_items[0][quantity]': 1,
+            'success_url': done + '?session_id={CHECKOUT_SESSION_ID}', 'cancel_url': cancel,
+        }, idempotency='checkout-' + purchase['id'])
+        checkout_url = result.get('url', '')
+        allowed_hosts = {'checkout.stripe.com'}
         parsed = parse.urlparse(checkout_url)
         if parsed.scheme != 'https' or parsed.hostname not in allowed_hosts:
             raise PaymentError('The provider did not return a valid checkout page.')
@@ -183,62 +138,21 @@ class Payments:
                 if updated.rowcount != 1:
                     raise PaymentError('The purchase account no longer exists.')
 
-    def reconcile(self, purchase, *, capture=False):
+    def reconcile(self, purchase):
+        if purchase['provider'] != 'stripe':
+            raise PaymentError('This payment method is no longer supported.')
         if purchase['status'] == 'paid' or not purchase['provider_order_id']:
             return
         order_id = provider_id(purchase['provider_order_id'])
-        if purchase['provider'] == 'stripe':
-            result = self.stripe('checkout/sessions/' + order_id)
-            if result.get('id') != order_id or result.get('client_reference_id') != purchase['id']:
-                raise PaymentError('Payment reference did not match.')
-            if (result.get('amount_total') != purchase['amount_cents'] or result.get('currency') != 'usd' or
-                    result.get('mode') != 'payment' or
-                    result.get('livemode') is not self.app.config['STRIPE_SECRET_KEY'].startswith('sk_live_')):
-                raise PaymentError('Payment details did not match the purchased package.')
-            if result.get('payment_status') == 'paid' and result.get('status') == 'complete':
-                self.credit(purchase, result.get('payment_intent'))
-        else:
-            result = self.paypal('/v2/checkout/orders/' + order_id)
-            if result.get('id') != order_id or result.get('intent') != 'CAPTURE':
-                raise PaymentError('Payment reference did not match.')
-            units = result.get('purchase_units', [])
-            if len(units) != 1 or units[0].get('custom_id') != purchase['id']:
-                raise PaymentError('Payment reference did not match.')
-            unit = units[0]
-            amount = unit.get('amount', {})
-            if amount.get('currency_code') != 'USD' or usd_cents(amount.get('value')) != purchase['amount_cents']:
-                raise PaymentError('Payment amount did not match the purchased package.')
-            if result.get('status') == 'APPROVED' and capture:
-                try:
-                    self.paypal('/v2/checkout/orders/' + order_id + '/capture', data={},
-                                idempotency='cap-' + purchase['id'])
-                except PaymentError:
-                    pass  # A concurrent worker may have captured it already.
-                # Fetch the full order again: capture responses can omit order fields.
-                self.reconcile(purchase, capture=False)
-                if self.purchase(purchase['id'])['status'] != 'paid':
-                    raise PaymentError('PayPal has not confirmed capture yet.')
-                return
-            captures = unit.get('payments', {}).get('captures', [])
-            if result.get('status') != 'COMPLETED' or len(captures) != 1:
-                return
-            payment = captures[0]
-            amount = payment.get('amount', {})
-            if payment.get('status') != 'COMPLETED':
-                return
-            if amount.get('currency_code') != 'USD' or usd_cents(amount.get('value')) != purchase['amount_cents']:
-                raise PaymentError('Captured amount did not match the purchased package.')
-            self.credit(purchase, payment.get('id'))
-
-    def verify_paypal_event(self, event, headers):
-        names = {'auth_algo': 'PAYPAL-AUTH-ALGO', 'cert_url': 'PAYPAL-CERT-URL',
-                 'transmission_id': 'PAYPAL-TRANSMISSION-ID', 'transmission_sig': 'PAYPAL-TRANSMISSION-SIG',
-                 'transmission_time': 'PAYPAL-TRANSMISSION-TIME'}
-        if not all(headers.get(value) for value in names.values()):
-            return False
-        body = {key: headers[value] for key, value in names.items()}
-        body.update(webhook_id=self.app.config['PAYPAL_WEBHOOK_ID'], webhook_event=event)
-        return self.paypal('/v1/notifications/verify-webhook-signature', data=body).get('verification_status') == 'SUCCESS'
+        result = self.stripe('checkout/sessions/' + order_id)
+        if result.get('id') != order_id or result.get('client_reference_id') != purchase['id']:
+            raise PaymentError('Payment reference did not match.')
+        if (result.get('amount_total') != purchase['amount_cents'] or result.get('currency') != 'usd' or
+                result.get('mode') != 'payment' or
+                result.get('livemode') is not self.app.config['STRIPE_SECRET_KEY'].startswith('sk_live_')):
+            raise PaymentError('Payment details did not match the purchased package.')
+        if result.get('payment_status') == 'paid' and result.get('status') == 'complete':
+            self.credit(purchase, result.get('payment_intent'))
 
 
 def init_payments(app, get_db):
@@ -286,7 +200,7 @@ def init_payments(app, get_db):
         if not session.get('user_id'):
             return redirect(url_for('login'))
         user = require_user()
-        providers = [name for name in ('paypal', 'stripe') if service.enabled(name)]
+        providers = [name for name in ('stripe',) if service.enabled(name)]
         history = get_db().execute('SELECT * FROM minute_purchases WHERE user_id = ? ORDER BY created_at DESC LIMIT 20',
                                    (user['id'],)).fetchall()
         token = signer.dumps({'id': secrets.token_hex(16), 'user_id': user['id']})
@@ -335,7 +249,7 @@ def init_payments(app, get_db):
         if not service.enabled(purchase['provider']):
             return render_template('payment_error.html', message='This payment method is temporarily unavailable.'), 503
         try:
-            service.reconcile(purchase, capture=True)
+            service.reconcile(purchase)
             purchase = service.purchase(purchase_id)
             if purchase['status'] != 'paid':
                 return redirect(service.checkout(purchase), code=303)
@@ -349,7 +263,7 @@ def init_payments(app, get_db):
         purchase = owned_purchase(purchase_id)
         try:
             # Browser parameters never determine price, credit, or payment ID.
-            service.reconcile(purchase, capture=True)
+            service.reconcile(purchase)
         except PaymentError:
             pass  # Signed webhooks can finish fulfillment if the browser leaves.
         return redirect(url_for('payments.receipt', purchase_id=purchase_id))
@@ -381,37 +295,6 @@ def init_payments(app, get_db):
             if obj.get('id') != purchase['provider_order_id']:
                 return '', 400
             service.reconcile(purchase)
-        except (ValueError, KeyError, TypeError, AttributeError):
-            return '', 400
-        except PaymentError:
-            return '', 503
-        return '', 200
-
-    @bp.post('/payments/webhooks/paypal')
-    def paypal_webhook():
-        if not service.enabled('paypal'):
-            return '', 503
-        if request.content_length and request.content_length > 262144:
-            abort(413)
-        event = request.get_json(silent=True)
-        if not isinstance(event, dict):
-            return '', 400
-        try:
-            if not service.verify_paypal_event(event, request.headers):
-                return '', 400
-            kind = event.get('event_type')
-            resource = event.get('resource', {})
-            if kind == 'CHECKOUT.ORDER.APPROVED':
-                order_id = resource.get('id')
-            elif kind == 'PAYMENT.CAPTURE.COMPLETED':
-                order_id = resource.get('supplementary_data', {}).get('related_ids', {}).get('order_id')
-            else:
-                return '', 200
-            purchase = get_db().execute("SELECT * FROM minute_purchases WHERE provider = 'paypal' AND provider_order_id = ?",
-                                        (order_id,)).fetchone()
-            if not purchase:
-                return '', 503  # Allow delivery to retry after checkout creation.
-            service.reconcile(purchase, capture=kind == 'CHECKOUT.ORDER.APPROVED')
         except (ValueError, KeyError, TypeError, AttributeError):
             return '', 400
         except PaymentError:

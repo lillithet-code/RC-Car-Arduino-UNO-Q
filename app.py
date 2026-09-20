@@ -1063,7 +1063,7 @@ def create_app(test_config=None):
 
     @app.before_request
     def ensure_session_state():
-        if request.endpoint in ('payments.stripe_webhook', 'payments.paypal_webhook'):
+        if request.endpoint == 'payments.stripe_webhook':
             return None
         expire_offline_sessions()
         if 'user_id' in session:
