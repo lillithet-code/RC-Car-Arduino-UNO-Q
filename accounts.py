@@ -134,7 +134,7 @@ def init_accounts(app, get_db, release_control):
         link = base + url_for(route, token=token)
         if purpose == 'verify':
             subject = 'Confirm your RC Car email address'
-            body = f'Confirm your email address to enable your RC Car account:\n\n{link}\n\nThis link expires in 24 hours. New accounts start with 0 minutes.\n\nIf you did not create this account, ignore this email.'
+            body = f'Confirm your email address to enable your RC Car account:\n\n{link}\n\nThis link expires in 24 hours.\n\nIf you did not create this account, ignore this email.'
         else:
             subject = 'Reset your RC Car password'
             body = f'Choose a new password for your RC Car account:\n\n{link}\n\nThis link expires in 30 minutes and can be used once.\n\nIf you did not request this, ignore this email. Your password has not changed.'
