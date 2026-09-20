@@ -99,6 +99,26 @@ def webhook(key):
     return matches[0]
 
 
+def server_settings(text, env, migrate_stripe=False):
+    changes = {
+        'ACCOUNT_BASE_URL': f'https://{NEW}',
+        'MEDIAMTX_WHEP_BASE': f'https://{NEW}',
+        'MEDIAMTX_RTSP_BASE': f'rtsp://{NEW}:8554',
+    }
+    key = ''
+    endpoint = None
+    if migrate_stripe:
+        key = env.get('STRIPE_SECRET_KEY', '').strip()
+        if not key:
+            raise RuntimeError('--migrate-stripe requires a configured Stripe API key.')
+        endpoint = webhook(key)
+        changes['PAYMENTS_BASE_URL'] = f'https://{NEW}'
+        print('Stripe webhook located; its URL and payment return URLs will change.')
+    else:
+        print('Keeping existing payment URLs and Stripe configuration; no Stripe API calls.')
+    return update_env(text, changes), key, endpoint
+
+
 def atomic_write(path, content, metadata=None):
     path = Path(path)
     metadata = metadata or (path.stat() if path.exists() else None)
@@ -119,10 +139,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true', help='perform changes; otherwise check only')
     parser.add_argument('--board', action='store_true', help='run on a Pi/UNO Q instead of Plesk')
+    parser.add_argument('--migrate-stripe', action='store_true',
+                        help='also move Stripe webhook and payment return URLs (default: preserve payments)')
     parser.add_argument('--env-file', type=Path, help='required for --board')
     parser.add_argument('--server-ip', default='217.154.249.28')
     parser.add_argument('--mediamtx-config', type=Path, default=Path('/opt/mediamtx/mediamtx.yml'))
     args = parser.parse_args()
+    if args.board and args.migrate_stripe:
+        parser.error('--migrate-stripe is only for the website server.')
     if os.geteuid() != 0:
         parser.error('Run with sudo python3.')
     changes = {}
@@ -165,19 +189,12 @@ def main():
                 changes[dest] = proxy_block(source.read_text(), dest.read_text() if dest.exists() else '')
         if not changes:
             raise RuntimeError('No managed Plesk proxy configuration found on the old domain.')
-        changes[env_file] = update_env(env_file.read_text(), {
-            'ACCOUNT_BASE_URL': f'https://{NEW}', 'PAYMENTS_BASE_URL': f'https://{NEW}',
-            'MEDIAMTX_WHEP_BASE': f'https://{NEW}', 'MEDIAMTX_RTSP_BASE': f'rtsp://{NEW}:8554'})
+        changes[env_file], key, endpoint = server_settings(
+            env_file.read_text(), env, args.migrate_stripe)
         changes[args.mediamtx_config] = media_hosts(args.mediamtx_config.read_text())
         services = ['mediamtx', 'rc-car-web']
         for service in services:
             run('systemctl', 'is-active', service)
-        key = env.get('STRIPE_SECRET_KEY', '')
-        if key:
-            endpoint = webhook(key)
-            print('Stripe webhook located; only its URL will change.')
-        else:
-            print('Stripe has no configured API key; payment setup is unchanged.')
         db_url = env.get('DATABASE_URL', '')
         if not db_url.startswith('sqlite:///'):
             raise RuntimeError('Expected SQLite DATABASE_URL; back up and migrate custom database deployments separately.')

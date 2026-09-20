@@ -29,17 +29,26 @@ sudo python3 migrate_domain.py --apply
 ```
 
 Checks include DNS, certificate validation, existing service configuration,
-managed Plesk proxy blocks, MediaMTX configuration and the configured Stripe
-account's webhook. The script supports this repository's standard MediaMTX
+managed Plesk proxy blocks and MediaMTX configuration. By default, no Stripe
+API calls are made and payment settings remain unchanged. The script supports this repository's standard MediaMTX
 block-list YAML; it stops for custom origin restrictions or conflicting Plesk
 proxy rules rather than overwriting them.
 
 It copies the existing managed proxy blocks to the new domain, updates account,
-payment, WHEP and RTSP base URLs, adds the new WebRTC host, reconfigures Plesk,
-restarts services and checks the new login page. With a Stripe key configured,
-it updates the one existing enabled old/new-domain webhook in that key's account
-and mode, preserving its event subscriptions and signing secret. If you use both
-Stripe test and live modes, update the other mode's endpoint separately too.
+WHEP and RTSP base URLs, adds the new WebRTC host, reconfigures Plesk,
+restarts services and checks the new login page. Both domains share the same
+application and database. The existing Stripe webhook and payment return URLs
+can keep using the old domain; keep its DNS, hosting and HTTPS certificate active.
+Users may return to the old domain after checkout and need to log in there.
+
+Only if you later want to move payments too, add `--migrate-stripe` to both the
+check and apply commands. This explicitly enables Stripe endpoint discovery,
+updates the one existing enabled old/new-domain webhook in the configured key's
+account and mode, and changes `PAYMENTS_BASE_URL`. It preserves event subscriptions
+and the signing secret. This optional mode still stops if the endpoint cannot be
+identified. If using both Stripe test and live modes, update the other mode's
+endpoint separately too. No Stripe dashboard changes are needed for the default
+parallel-domain setup.
 
 Backups are printed as `/var/backups/rc-car-domain-*`. They contain a SQLite
 snapshot and numbered original configuration files, mapped by `files.json`.

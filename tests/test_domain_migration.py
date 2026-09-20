@@ -9,6 +9,38 @@ spec.loader.exec_module(m)
 
 
 class MigrationTests(unittest.TestCase):
+    def test_default_migration_preserves_payments_without_stripe_access(self):
+        original = ('PAYMENTS_BASE_URL="https://drive.kbob.org"\n'
+                    'STRIPE_SECRET_KEY=existing\nSTRIPE_WEBHOOK_SECRET=existing-signing-secret\n')
+        with patch.object(m, 'stripe', side_effect=AssertionError('Stripe must not be contacted')) as api:
+            result, key, endpoint = m.server_settings(original, {'STRIPE_SECRET_KEY': 'existing'})
+        api.assert_not_called()
+        self.assertTrue(result.startswith(original))
+        self.assertIn('ACCOUNT_BASE_URL=https://stream-driver.com\n', result)
+        self.assertEqual(key, '')
+        self.assertIsNone(endpoint)
+
+    def test_default_does_not_introduce_payment_override(self):
+        result, _, endpoint = m.server_settings('SMTP_HOST=kbob.org\n', {})
+        self.assertNotIn('PAYMENTS_BASE_URL', result)
+        self.assertIsNone(endpoint)
+
+    def test_explicit_stripe_migration_retains_validation(self):
+        with patch.object(m, 'stripe', return_value={'data': [], 'has_more': False}):
+            with self.assertRaises(RuntimeError):
+                m.server_settings('', {'STRIPE_SECRET_KEY': 'existing'}, True)
+        with self.assertRaises(RuntimeError):
+            m.server_settings('', {}, True)
+
+    def test_explicit_stripe_migration_plans_payment_change(self):
+        endpoint = {'id': 'we_target', 'url': 'https://drive.kbob.org/payments/webhooks/stripe', 'status': 'enabled'}
+        with patch.object(m, 'stripe', return_value={'data': [endpoint], 'has_more': False}):
+            result, key, selected = m.server_settings('PAYMENTS_BASE_URL=https://drive.kbob.org\n',
+                                                    {'STRIPE_SECRET_KEY': 'existing'}, True)
+        self.assertIn('PAYMENTS_BASE_URL=https://stream-driver.com\n', result)
+        self.assertEqual(key, 'existing')
+        self.assertEqual(selected, endpoint)
+
     def test_env_preserves_secrets_and_removes_duplicate_setting(self):
         original = '# comment\nSMTP_PASSWORD="a=b # c"\nACCOUNT_BASE_URL=old\nACCOUNT_BASE_URL=older\n'
         result = m.update_env(original, {'ACCOUNT_BASE_URL': 'https://stream-driver.com'})
