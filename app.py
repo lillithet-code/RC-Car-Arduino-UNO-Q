@@ -16,6 +16,7 @@ from urllib import request as urllib_request
 
 from flask import Flask, g, redirect, render_template, request, session, url_for, jsonify, Response
 from flask_sock import Sock
+from payments import init_payments
 from simple_websocket import ConnectionClosed
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -429,6 +430,7 @@ def create_app(test_config=None):
         return releasable_session
 
     init_db()
+    init_payments(app, get_db)
 
     default_board_name = '__default__'
     stream_states = {}
@@ -1061,6 +1063,8 @@ def create_app(test_config=None):
 
     @app.before_request
     def ensure_session_state():
+        if request.endpoint in ('payments.stripe_webhook', 'payments.paypal_webhook'):
+            return None
         expire_offline_sessions()
         if 'user_id' in session:
             refresh_sessions()

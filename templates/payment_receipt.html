@@ -1,0 +1,41 @@
+{% extends 'payment_base.html' %}
+{% block title %}Purchase status{% endblock %}
+{% block content %}
+  <h1>{{ 'Your minutes are ready' if purchase.status == 'paid' else 'Purchase status' }}</h1>
+  <div class="card">
+    <h2>{{ purchase.minutes }} minutes · ${{ '%.2f'|format(purchase.amount_cents / 100) }} USD</h2>
+    <p>Payment method: {{ 'PayPal' if purchase.provider == 'paypal' else 'Stripe' }}</p>
+    {% if message %}<p class="notice" role="status">{{ message }}</p>{% endif %}
+    {% if purchase.status == 'paid' %}
+      <p class="success" role="status">Payment confirmed. {{ purchase.minutes }} minutes have been added to your balance.</p>
+      <p>Your minutes are available for your next booking.</p>
+      <a href="{{ url_for('index') }}">Back to the cars →</a>
+    {% else %}
+      <p class="notice" role="status">Waiting for payment confirmation. This page checks for updates automatically.</p>
+      <p>If you have already paid, allow a moment for confirmation. Do not start another purchase for the same payment. The button below checks this purchase before reopening checkout.</p>
+      <form method="post" action="{{ url_for('payments.retry', purchase_id=purchase.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Check payment / resume checkout</button>
+      </form>
+    {% endif %}
+    <p class="muted">Purchase reference: <code>{{ purchase.id }}</code></p>
+  </div>
+  <a href="{{ url_for('payments.shop') }}">Packages and purchase history</a>
+{% endblock %}
+{% block scripts %}
+{% if purchase.status != 'paid' %}
+<script>
+  let attempts = 0;
+  async function checkPayment() {
+    try {
+      const response = await fetch({{ url_for('payments.purchase_status', purchase_id=purchase.id)|tojson }}, {cache: 'no-store'});
+      if (!response.ok || response.redirected) return;
+      const result = await response.json();
+      if (result.status === 'paid') { window.location.reload(); return; }
+    } catch (_) { /* Retry temporary connection failures. */ }
+    if (++attempts < 60) window.setTimeout(checkPayment, 3000);
+  }
+  window.setTimeout(checkPayment, 3000);
+</script>
+{% endif %}
+{% endblock %}

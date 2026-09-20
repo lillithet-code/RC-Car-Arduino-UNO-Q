@@ -132,6 +132,7 @@
           <div class="pill">Remaining time: <span id="remaining-time" data-seconds="{{ remaining_seconds if remaining_seconds is not none else user.balance }}">{{ remaining_seconds if remaining_seconds is not none else user.balance }}</span></div>
         </div>
         <div class="top-actions">
+          <a href="{{ url_for('payments.shop') }}">Buy minutes</a>
           {% if user.is_admin %}<a href="{{ url_for('admin') }}">Admin panel</a>{% endif %}
           <a href="{{ url_for('logout') }}">Logout</a>
         </div>

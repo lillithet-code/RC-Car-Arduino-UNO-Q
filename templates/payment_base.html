@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Buy minutes{% endblock %} · RC Car</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: linear-gradient(135deg, #0f172a, #111827); color: #f8fafc; min-height: 100vh; }
+    main { max-width: 900px; margin: auto; padding: 2rem 1rem; }
+    nav { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }
+    a { color: #93c5fd; }
+    h1 { font-size: 2rem; margin: 0 0 0.6rem; }
+    h2, legend { font-size: 1.2rem; font-weight: bold; }
+    p { line-height: 1.6; }
+    .muted { color: #cbd5e1; }
+    .card { padding: 1.5rem; border-radius: 20px; background: #111c30; border: 1px solid #334155; margin: 1.5rem 0; }
+    fieldset { border: 0; margin: 0 0 1.5rem; padding: 0; min-width: 0; }
+    legend { margin-bottom: 1rem; }
+    .packages { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.8rem; }
+    .choice { display: flex; gap: 0.65rem; align-items: center; padding: 1.1rem; border: 2px solid #475569; border-radius: 14px; cursor: pointer; }
+    .choice:has(input:checked) { background: #172d50; border-color: #60a5fa; }
+    .choice:focus-within { outline: 2px solid #fbbf24; outline-offset: 3px; }
+    .choice strong { display: block; margin-bottom: 0.4rem; font-size: 1.15rem; }
+    input { accent-color: #60a5fa; }
+    .methods { display: flex; gap: 0.8rem; flex-wrap: wrap; }
+    .methods .choice { flex: 1 1 220px; }
+    button { padding: 0.9rem 1.4rem; border-radius: 999px; background: #2563eb; color: white; border: 0; font-size: 1rem; font-weight: bold; cursor: pointer; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .notice { padding: 1rem; background: #243248; border-left: 3px solid #93c5fd; border-radius: 6px; }
+    .success { color: #86efac; }
+    .history { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th, td { padding: 0.85rem 0.5rem; border-bottom: 1px solid #334155; white-space: nowrap; }
+    .tag { color: #bfdbfe; }
+    @media (max-width: 540px) { .packages { grid-template-columns: repeat(2, 1fr); } .card { padding: 1rem; } .choice { padding: 0.85rem; } }
+  </style>
+</head>
+<body>
+  <main>
+    <nav><a href="{{ url_for('index') }}">← Dashboard</a><span>RC Car · Driving time</span></nav>
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

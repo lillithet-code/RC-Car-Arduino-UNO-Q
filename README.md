@@ -2,6 +2,8 @@
 
 Remote RC car control stack with per-car session isolation, MediaMTX passthrough streaming, and board-safe command handling.
 
+Users can buy 5, 10, 15, 20, 30 or 60 minutes using PayPal or card checkout through Stripe. See [payment setup and package prices](PAYMENTS.md) for credentials, webhook configuration, testing and deployment instructions.
+
 ## What changed
 - UNO Q Linux publishes H.264 once to MediaMTX over RTSP.
 - Browser playback uses WebRTC WHEP from MediaMTX.

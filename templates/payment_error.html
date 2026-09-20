@@ -1,0 +1,7 @@
+{% extends 'payment_base.html' %}
+{% block title %}Checkout unavailable{% endblock %}
+{% block content %}
+<h1>Checkout unavailable</h1>
+<p class="notice" role="alert">{{ message }}</p>
+<a href="{{ url_for('payments.shop') }}">Back to minute packages</a>
+{% endblock %}
