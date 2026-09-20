@@ -110,6 +110,38 @@ def test_server_prices_checkout_and_reuses_order(env, monkeypatch, minutes, cent
     assert calls[0][1]['idempotency']
 
 
+@pytest.mark.parametrize('host,expected', [
+    ('drive.kbob.org', 'https://drive.kbob.org'),
+    ('stream-driver.com', 'https://stream-driver.com'),
+    ('STREAM-DRIVER.COM:443', 'https://stream-driver.com'),
+    ('stream-driver.com.evil.example', 'https://drive.example'),
+    ('stream-driver.com:8000', 'https://drive.example'),
+    ('evil.example', 'https://drive.example'),
+])
+def test_checkout_return_domain_is_allowed_request_host(env, monkeypatch, host, expected):
+    app, db, client, service = env
+    purchase = pending(env, monkeypatch)
+    purchase['checkout_url'] = None
+    calls = []
+    def api(path, **kwargs):
+        calls.append(kwargs['data'])
+        return {'id': 'cs_domain', 'url': 'https://checkout.stripe.com/c/pay/domain'}
+    monkeypatch.setattr(service, 'stripe', api)
+    with app.test_request_context('/payments/checkout', base_url='http://' + host,
+                                  headers={'Referer': 'https://evil.example',
+                                           'X-Forwarded-Host': 'evil.example'}):
+        service.checkout(purchase)
+        # Existing sessions must stay reusable without creating another charge.
+        service.checkout(service.purchase(purchase['id']))
+    assert len(calls) == 1
+    assert calls[0]['success_url'] == expected + '/payments/return/' + purchase['id'] + '?session_id={CHECKOUT_SESSION_ID}'
+    assert calls[0]['cancel_url'] == expected + '/payments/purchases/' + purchase['id'] + '?cancelled=1'
+
+
+def test_payment_base_outside_request_uses_configuration(env):
+    assert env[3].base_url() == 'https://drive.example'
+
+
 @pytest.mark.parametrize('override', [{'minutes': 1}, {'minutes': -5}, {'minutes': '5.5'}, {'provider': 'fake'}, {'checkout_token': 'tampered'}])
 def test_invalid_checkout(env, override):
     _, db, client, _ = env

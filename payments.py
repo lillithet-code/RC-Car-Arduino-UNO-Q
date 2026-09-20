@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from urllib import parse, request as http, error as http_error
 
-from flask import Blueprint, abort, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, abort, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 
@@ -77,6 +77,14 @@ class Payments:
         return False
 
     def base_url(self):
+        # Plesk preserves Host, but its backend connection can be HTTP. Use a
+        # fixed HTTPS origin for our known public domains, never arbitrary
+        # Host/Referer/return_to values supplied by a client.
+        if has_request_context():
+            host = request.host.lower()
+            for domain in ('drive.kbob.org', 'stream-driver.com'):
+                if host in (domain, domain + ':443'):
+                    return 'https://' + domain
         value = self.app.config['PAYMENTS_BASE_URL'].rstrip('/')
         parsed = parse.urlparse(value)
         if (parsed.scheme != 'https' and not self.app.testing) or not parsed.netloc or parsed.query or parsed.fragment:

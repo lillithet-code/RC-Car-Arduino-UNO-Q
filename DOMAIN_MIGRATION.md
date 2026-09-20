@@ -37,9 +37,12 @@ proxy rules rather than overwriting them.
 It copies the existing managed proxy blocks to the new domain, updates account,
 WHEP and RTSP base URLs, adds the new WebRTC host, reconfigures Plesk,
 restarts services and checks the new login page. Both domains share the same
-application and database. The existing Stripe webhook and payment return URLs
-can keep using the old domain; keep its DNS, hosting and HTTPS certificate active.
-Users may return to the old domain after checkout and need to log in there.
+application and database. The existing Stripe webhook can keep using the old
+domain; keep its DNS, hosting and HTTPS certificate active. With the current
+payments.py deployed, new checkout sessions return to the domain where checkout
+started: drive.kbob.org or stream-driver.com. Both success and cancellation use
+that domain over HTTPS. PAYMENTS_BASE_URL remains the fallback for other hosts.
+Previously created Stripe sessions retain their original return URLs.
 
 Only if you later want to move payments too, add `--migrate-stripe` to both the
 check and apply commands. This explicitly enables Stripe endpoint discovery,
