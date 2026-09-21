@@ -8,13 +8,19 @@
     * { box-sizing: border-box; }
     a { color: #93c5fd; }
     body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
-    .box { max-width: 420px; margin: 4rem auto; background: #111827; padding: 2rem; border-radius: 16px; }
+    .login-brand { display: block; width: min(620px, calc(100% - 2rem)); margin: 1.5rem auto 0; }
+    .login-brand img { display: block; width: 100%; height: auto; }
+    .box { max-width: 420px; margin: 1.5rem auto 3rem; background: #111827; padding: 2rem; border-radius: 16px; }
+    @media (max-width: 460px) { .box { margin-left: 1rem; margin-right: 1rem; padding: 1.5rem; } }
     input { width: 100%; margin: 0.4rem 0 1rem; padding: 0.7rem; border-radius: 8px; border: 1px solid #334155; }
     button { padding: 0.7rem 1rem; border-radius: 8px; background: #2563eb; color: white; border: 0; }
     .error { color: #fca5a5; }
   </style>
 </head>
 <body>
+  <header class="login-brand">
+    <img src="{{ url_for('static', filename='images/logo.png') }}" alt="Stream Driver Girls" fetchpriority="high">
+  </header>
   <div class="box">
     <h1>Login</h1>
     {% for message in get_flashed_messages(category_filter=['registration']) %}
@@ -35,3 +41,4 @@
   </div>
 </body>
 </html>
+
