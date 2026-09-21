@@ -7,6 +7,8 @@
   <style>
     body { font-family: Arial, sans-serif; margin: 0; background: linear-gradient(135deg, #0f172a, #111827); color: #f8fafc; }
     .container { max-width: 980px; margin: 0 auto; padding: 2rem; }
+    .dashboard-banner { margin-bottom: 1.5rem; }
+    .dashboard-banner img { display: block; width: 100%; height: auto; }
     .card { background: rgba(17,24,39,0.92); padding: 1.35rem; border-radius: 20px; box-shadow: 0 18px 40px rgba(0,0,0,0.25); margin-bottom: 1rem; }
     .hero { display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; }
     button { padding: 0.7rem 1rem; border-radius: 999px; background: linear-gradient(90deg, #2563eb, #3b82f6); color: white; border: 0; cursor: pointer; }
@@ -128,6 +130,9 @@
 </head>
 <body>
   <div class="container">
+    <header class="dashboard-banner">
+      <img src="{{ url_for('static', filename='images/banner.png') }}" alt="Stream Driver Girls" width="2172" height="724" fetchpriority="high">
+    </header>
     <div class="card">
       <div class="hero">
         <div>
@@ -1210,3 +1215,4 @@
   </script>
 </body>
 </html>
+
