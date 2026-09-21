@@ -67,6 +67,62 @@ def test_trim_rejects_invalid_values(setup, value):
     assert admin.post('/api/admin/steering-trim', json={'trim': value}).status_code == 400
 
 
+def test_car_settings_admin_only_persistent_and_applied_once(setup):
+    app, db, admin, driver, board, config = setup
+    settings = dict(device_id=1, trim=0.12, invert_steering=True, invert_drive=True, max_speed=25)
+    assert driver.post('/api/admin/car-settings', json=settings).status_code == 403
+    assert app.test_client().post('/api/admin/car-settings', json=settings).status_code == 403
+    assert admin.post('/api/admin/car-settings', json=settings).status_code == 409
+    admin.post('/request_car')
+    assert admin.post('/api/admin/car-settings', json=settings | {'device_id': 2}).status_code == 409
+    assert admin.post('/api/admin/car-settings', json=settings).status_code == 200
+    html = admin.get('/').get_data(as_text=True)
+    assert 'id="max-speed" type="range"' in html
+    assert 'id="steering-trim" type="range"' in html
+    admin.post('/release_car')
+    driver.post('/request_car')
+    assert 'id="car-settings"' not in driver.get('/').get_data(as_text=True)
+    driver.post('/api/control', json={'throttle': 0.8, 'steering': 0.5, 'max_speed': 100, 'invert_drive': False})
+    for _ in range(2):
+        command = board.get('/api/board/command?board_name=car1').json
+        assert command['throttle'] == pytest.approx(-0.2)
+        assert command['steering'] == -0.5
+        assert command['steering_trim'] == 0.12
+    driver.post('/api/control', json={'throttle': -1, 'steering': -1})
+    command = board.get('/api/board/command?board_name=car1').json
+    assert command['throttle'] == 0.25 and command['steering'] == 1
+    assert tuple(db.execute('SELECT invert_steering, invert_drive, max_speed FROM devices WHERE id=2').fetchone()) == (0, 0, 100)
+    create_app(config)
+    assert tuple(db.execute('SELECT invert_steering, invert_drive, max_speed FROM devices WHERE id=1').fetchone()) == (1, 1, 25)
+
+
+@pytest.mark.parametrize('override', [{'max_speed': -1}, {'max_speed': 101}, {'max_speed': 'NaN'},
+    {'max_speed': True}, {'trim': 'inf'}, {'trim': -0.31}, {'invert_drive': 'false'}, {'invert_steering': 1}])
+def test_car_settings_reject_invalid_input_atomically(setup, override):
+    _, db, admin, _, _, _ = setup
+    admin.post('/request_car')
+    settings = dict(device_id=1, trim=0.1, invert_steering=False, invert_drive=False, max_speed=50)
+    assert admin.post('/api/admin/car-settings', json=settings | override).status_code == 400
+    assert tuple(db.execute('SELECT steering_trim, max_speed FROM devices WHERE id=1').fetchone()) == (0, 100)
+
+
+@pytest.mark.parametrize('speed', [0, 100])
+def test_speed_endpoints_and_inactive_control(setup, speed):
+    _, _, admin, _, board, _ = setup
+    admin.post('/request_car')
+    assert admin.post('/api/admin/car-settings', json=dict(device_id=1, trim=0, invert_steering=False,
+        invert_drive=False, max_speed=speed)).status_code == 200
+    admin.post('/api/control', json={'throttle': 1, 'steering': 0.5})
+    command = board.get('/api/board/command?board_name=car1').json
+    assert command['throttle'] == speed / 100
+    assert command['steering'] == 0.5
+    assert command['stop'] is (speed == 0)
+    admin.post('/release_car')
+    command = board.get('/api/board/command?board_name=car1').json
+    assert command['throttle'] == command['steering'] == 0
+    assert command['control_active'] is False
+
+
 def test_offline_countdown_stops_session_refunds_and_survives_heartbeat(setup):
     app, db, admin, driver, board, config = setup
     driver.post('/request_car')

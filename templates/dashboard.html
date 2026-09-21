@@ -188,13 +188,15 @@
               <div class="knob" id="knob"></div>
             </div>
             {% if user.is_admin %}
-            <fieldset style="margin-top:1rem;border:1px solid #334155;border-radius:8px;">
-              <legend>Steering trim · {{ active_session.name }}</legend>
-              <button type="button" class="trim-button" data-step="-1" aria-label="Trim steering left">← Left</button>
-              <output id="steering-trim" data-value="{{ active_session.steering_trim or 0 }}">{{ '%+.0f'|format((active_session.steering_trim or 0) * 100) }}%</output>
-              <button type="button" class="trim-button" data-step="1" aria-label="Trim steering right">Right →</button>
-              <button type="button" class="trim-button" data-step="0">Reset</button>
-              <p id="trim-status" role="status" aria-live="polite">Saved for this car and every driver. Steer or drive to check alignment.</p>
+            <fieldset id="car-settings" data-device-id="{{ active_session.device_id }}" style="margin-top:1rem;border:1px solid #334155;border-radius:8px;">
+              <legend>Car settings · {{ active_session.name }}</legend>
+              <p><label><input id="invert-steering" type="checkbox" {% if active_session.invert_steering %}checked{% endif %}> Invert left/right</label></p>
+              <p><label><input id="invert-drive" type="checkbox" {% if active_session.invert_drive %}checked{% endif %}> Invert forward/backward</label></p>
+              <label for="max-speed">Maximum speed: <output id="max-speed-value">{{ active_session.max_speed|round|int }}%</output></label>
+              <input id="max-speed" type="range" min="0" max="100" step="1" value="{{ active_session.max_speed }}" style="width:100%;">
+              <label for="steering-trim">Steering trim: <output id="trim-value">{{ '%+.0f'|format(active_session.steering_trim * 100) }}%</output></label>
+              <input id="steering-trim" type="range" min="-30" max="30" step="1" value="{{ (active_session.steering_trim * 100)|round|int }}" style="width:100%;">
+              <p id="trim-status" role="status" aria-live="polite">Saved per car for every driver. Changes save when you release a slider or toggle a checkbox.</p>
             </fieldset>
             {% endif %}
             <p id="control-status" class="control-status" role="status" aria-live="polite"></p>
@@ -219,24 +221,34 @@
       }
     }
     setInterval(showOfflineCountdown, 250);
-    const trimOutput = document.getElementById('steering-trim');
-    const trimButtons = document.querySelectorAll('.trim-button');
-    trimButtons.forEach(button => button.addEventListener('click', async () => {
-      const step = Number(button.dataset.step);
-      const trim = step === 0 ? 0 : Math.max(-30, Math.min(30, Math.round(Number(trimOutput.dataset.value) * 100) + step)) / 100;
-      trimButtons.forEach(item => { item.disabled = true; });
-      try {
-        const response = await fetch('/api/admin/steering-trim', {
-          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({trim}),
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.message || 'Could not save trim');
-        trimOutput.dataset.value = payload.trim;
-        trimOutput.textContent = `${payload.trim >= 0 ? '+' : ''}${Math.round(payload.trim * 100)}%`;
-        document.getElementById('trim-status').textContent = 'Saved for this car and every driver.';
-      } catch (error) { document.getElementById('trim-status').textContent = error.message; }
-      finally { trimButtons.forEach(item => { item.disabled = false; }); }
-    }));
+    const carSettings = document.getElementById('car-settings');
+    if (carSettings) {
+      const trim = document.getElementById('steering-trim');
+      const speed = document.getElementById('max-speed');
+      const invertSteering = document.getElementById('invert-steering');
+      const invertDrive = document.getElementById('invert-drive');
+      const status = document.getElementById('trim-status');
+      const labels = () => {
+        document.getElementById('trim-value').textContent = `${Number(trim.value) >= 0 ? '+' : ''}${trim.value}%`;
+        document.getElementById('max-speed-value').textContent = `${speed.value}%`;
+      };
+      carSettings.addEventListener('input', () => { labels(); status.textContent = 'Unsaved changes…'; });
+      carSettings.addEventListener('change', async () => {
+        const settings = {device_id: Number(carSettings.dataset.deviceId), trim: Number(trim.value) / 100,
+          max_speed: Number(speed.value), invert_steering: invertSteering.checked, invert_drive: invertDrive.checked};
+        carSettings.disabled = true;
+        status.textContent = 'Saving…';
+        try {
+          const response = await fetch('/api/admin/car-settings', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.message || 'Could not save settings');
+          status.textContent = 'Saved for this car and every driver.';
+        } catch (error) { status.textContent = `Not saved: ${error.message}. Adjust a control to retry.`; }
+        finally { carSettings.disabled = false; }
+      });
+    }
     const joystick = document.getElementById('joystick');
     const knob = document.getElementById('knob');
     const fullscreenJoystick = document.getElementById('fullscreen-joystick');
@@ -1215,4 +1227,3 @@
   </script>
 </body>
 </html>
-

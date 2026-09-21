@@ -228,6 +228,9 @@ def create_app(test_config=None):
             ensure_column('sessions', 'consumed_seconds', 'INTEGER DEFAULT 0')
             ensure_column('sessions', 'last_billing_at', 'TEXT')
             ensure_column('devices', 'steering_trim', 'REAL NOT NULL DEFAULT 0')
+            ensure_column('devices', 'invert_steering', 'INTEGER NOT NULL DEFAULT 0')
+            ensure_column('devices', 'invert_drive', 'INTEGER NOT NULL DEFAULT 0')
+            ensure_column('devices', 'max_speed', 'REAL NOT NULL DEFAULT 100')
             ensure_column('devices', 'admin_offline_at', 'TEXT')
             ensure_column('devices', 'poll_url', 'TEXT')
             ensure_column('devices', 'last_seen_at', 'TEXT')
@@ -381,7 +384,7 @@ def create_app(test_config=None):
     def get_active_session(user_id):
         db = get_db()
         return db.execute('''
-            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, s.allocated_seconds, s.consumed_seconds, s.last_billing_at, d.name, d.steering_trim, d.admin_offline_at
+            SELECT s.id, s.device_id, s.expires_at, s.billing_started_at, s.allocated_seconds, s.consumed_seconds, s.last_billing_at, d.name, d.steering_trim, d.invert_steering, d.invert_drive, d.max_speed, d.admin_offline_at
             FROM sessions s
             JOIN devices d ON d.id = s.device_id
             WHERE s.user_id = ? AND s.status = 'active'
@@ -512,8 +515,15 @@ def create_app(test_config=None):
         expire_offline_sessions()
         state = command_state_for_board(raw_board_name)
         payload = dict(state['payload'])
-        device = get_db().execute('SELECT steering_trim FROM devices WHERE name = ?', (raw_board_name,)).fetchone()
+        device = get_db().execute('SELECT steering_trim, invert_steering, invert_drive, max_speed FROM devices WHERE name = ?', (raw_board_name,)).fetchone()
         payload['steering_trim'] = float(device['steering_trim']) if device else 0.0
+        # Transform a copy at delivery, so repeated board polls never compound
+        # scaling/inversion and clients cannot override the saved car settings.
+        if device:
+            payload['throttle'] *= float(device['max_speed']) / 100 * (-1 if device['invert_drive'] else 1)
+            payload['steering'] *= -1 if device['invert_steering'] else 1
+            if payload['throttle'] == 0:
+                payload.update(stop=True, action='stop')
         payload['control_active'] = board_has_active_session(raw_board_name)
         if not payload['control_active']:
             payload.update(throttle=0.0, steering=0.0, stop=True, action='stop')
@@ -1377,6 +1387,34 @@ def create_app(test_config=None):
         db.execute('UPDATE devices SET steering_trim = ? WHERE id = ?', (trim, active['device_id']))
         db.commit()
         return jsonify(status='ok', trim=trim)
+
+    @app.route('/api/admin/car-settings', methods=['POST'])
+    def set_car_settings():
+        if not admin_api_authorized():
+            return jsonify(status='error', message='Admin access required'), 403
+        active = get_active_session(session['user_id'])
+        if not active:
+            return jsonify(status='error', message='Take control of a car first'), 409
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify(status='error', message='Invalid settings'), 400
+        if data.get('device_id') != active['device_id']:
+            return jsonify(status='error', message='The selected car changed. Reload the page.'), 409
+        if any(type(data.get(key)) is not bool for key in ('invert_steering', 'invert_drive')):
+            return jsonify(status='error', message='Inversion settings must be booleans'), 400
+        try:
+            if any(isinstance(data.get(key), bool) for key in ('trim', 'max_speed')):
+                raise ValueError()
+            trim, speed = float(data.get('trim')), float(data.get('max_speed'))
+        except (TypeError, ValueError):
+            return jsonify(status='error', message='Invalid trim or maximum speed'), 400
+        if not math.isfinite(trim) or not -0.3 <= trim <= 0.3 or not math.isfinite(speed) or not 0 <= speed <= 100:
+            return jsonify(status='error', message='Trim must be -30% to +30% and speed 0% to 100%'), 400
+        db = get_db()
+        db.execute('UPDATE devices SET steering_trim=?, invert_steering=?, invert_drive=?, max_speed=? WHERE id=?',
+                   (trim, int(data['invert_steering']), int(data['invert_drive']), speed, active['device_id']))
+        db.commit()
+        return jsonify(status='ok')
 
     @app.route('/api/admin/availability', methods=['POST'])
     def set_admin_availability():
